@@ -1,8 +1,10 @@
+mod cache;
 mod config;
 mod ocr;
 mod rename;
 mod tvdb;
 
+use cache::Cache;
 use clap::Parser;
 use std::fs;
 use std::io::{self, Write};
@@ -48,9 +50,12 @@ fn main() {
         }
     };
 
+    // Load cache
+    let mut cache = Cache::load();
+
     // Determine show ID
     let show_id = match (cli.show, cli.show_id) {
-        (Some(show_name), None) => match search_and_select_show(&api_key, &show_name) {
+        (Some(show_name), None) => match search_and_select_show(&api_key, &show_name, &mut cache) {
             Ok(id) => id,
             Err(e) => {
                 eprintln!("Error searching for show: {}", e);
@@ -68,14 +73,30 @@ fn main() {
         }
     };
 
+    // Preload cache with series name and all episodes (only if not already cached)
+    if !cache.has_series_episodes(&show_id) {
+        if let Err(e) = preload_cache(&api_key, &show_id, &mut cache) {
+            eprintln!("Warning: Failed to preload cache: {}", e);
+        } else {
+            // Save cache after preloading
+            if let Err(e) = cache.save() {
+                eprintln!("Warning: Failed to save cache after preload: {}", e);
+            }
+        }
+    } else {
+        println!("Using cached episode data for series {}", show_id);
+    }
+
     // Process input (file or directory)
     if cli.input.is_file() {
-        if let Err(e) = process_file(&cli.input, &api_key, &show_id, cli.no_confirm) {
+        if let Err(e) = process_file(&cli.input, &api_key, &show_id, cli.no_confirm, &mut cache) {
             eprintln!("Error processing file: {}", e);
             std::process::exit(1);
         }
     } else if cli.input.is_dir() {
-        if let Err(e) = process_directory(&cli.input, &api_key, &show_id, cli.no_confirm) {
+        if let Err(e) =
+            process_directory(&cli.input, &api_key, &show_id, cli.no_confirm, &mut cache)
+        {
             eprintln!("Error processing directory: {}", e);
             std::process::exit(1);
         }
@@ -83,11 +104,39 @@ fn main() {
         eprintln!("Error: Input path is neither a file nor a directory");
         std::process::exit(1);
     }
+
+    // Save cache before exiting
+    if let Err(e) = cache.save() {
+        eprintln!("Warning: Failed to save cache: {}", e);
+    }
+}
+
+fn preload_cache(
+    api_key: &str,
+    series_id: &str,
+    cache: &mut Cache,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = TvdbClient::new(api_key.to_string());
+    client.login()?;
+
+    // Get series name if not cached
+    if cache.get_series_name(series_id).is_none() {
+        let series_name = client.get_series_name(series_id)?;
+        cache.set_series_name(series_id.to_string(), series_name);
+    }
+
+    // Preload all episodes for this series
+    println!("Preloading episode cache for series {}...", series_id);
+    client.preload_episodes(series_id, cache)?;
+    println!("Cache preloaded successfully.");
+
+    Ok(())
 }
 
 fn search_and_select_show(
     api_key: &str,
     query: &str,
+    _cache: &mut Cache,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let mut client = TvdbClient::new(api_key.to_string());
     client.login()?;
@@ -134,6 +183,7 @@ fn process_file(
     api_key: &str,
     show_id: &str,
     skip_confirm: bool,
+    cache: &mut Cache,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if file_path.extension().and_then(|s| s.to_str()) != Some("mkv") {
         eprintln!("Skipping non-MKV file: {:?}", file_path);
@@ -160,23 +210,43 @@ fn process_file(
 
     println!("Found production code: {}", production_code);
 
-    // Lookup episode in TVDB
-    let mut client = TvdbClient::new(api_key.to_string());
-    client.login()?;
+    // Lookup episode in cache first
+    let episode = if let Some(ep_cache) = cache.get_episode(&production_code) {
+        // Use cached episode data
+        tvdb::Episode {
+            absolute_number: None,
+            season_number: ep_cache.season_number,
+            episode_number: ep_cache.episode_number,
+            id: 0,
+            name: ep_cache.name.clone(),
+        }
+    } else {
+        // Fallback to API lookup if not in cache
+        let mut client = TvdbClient::new(api_key.to_string());
+        client.login()?;
 
-    let episode = match client.find_episode_by_production_code(show_id, &production_code)? {
-        Some(ep) => ep,
-        None => {
-            eprintln!(
-                "Warning: Episode not found in TVDB for production code: {}",
-                production_code
-            );
-            return Ok(());
+        match client.find_episode_by_production_code(show_id, &production_code, cache)? {
+            Some(ep) => ep,
+            None => {
+                eprintln!(
+                    "Warning: Episode not found in TVDB for production code: {}",
+                    production_code
+                );
+                return Ok(());
+            }
         }
     };
 
-    // Get show name
-    let show_name = client.get_series_name(show_id)?;
+    // Get show name from cache or API
+    let show_name = if let Some(name) = cache.get_series_name(show_id) {
+        name.clone()
+    } else {
+        let mut client = TvdbClient::new(api_key.to_string());
+        client.login()?;
+        let name = client.get_series_name(show_id)?;
+        cache.set_series_name(show_id.to_string(), name.clone());
+        name
+    };
 
     // Generate new filename
     let new_filename = rename::generate_filename(
@@ -201,6 +271,7 @@ fn process_directory(
     api_key: &str,
     show_id: &str,
     skip_confirm: bool,
+    cache: &mut Cache,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entries = fs::read_dir(dir_path)?;
     let mut mkv_files: Vec<PathBuf> = entries
@@ -220,7 +291,7 @@ fn process_directory(
     println!("Found {} MKV file(s) to process", mkv_files.len());
 
     for file_path in mkv_files {
-        if let Err(e) = process_file(&file_path, api_key, show_id, skip_confirm) {
+        if let Err(e) = process_file(&file_path, api_key, show_id, skip_confirm, cache) {
             eprintln!("Error processing {:?}: {}", file_path, e);
             // Continue processing other files
         }
