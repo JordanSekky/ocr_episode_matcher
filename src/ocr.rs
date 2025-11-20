@@ -165,10 +165,10 @@ fn create_ocr_engine() -> Result<OcrEngine, Box<dyn std::error::Error>> {
     const RECOGNITION_MODEL_URL: &str =
         "https://ocrs-models.s3-accelerate.amazonaws.com/text-recognition.rten";
 
-    // Determine model directory - prefer $HOME/.ocrs/
+    // Determine model directory - use $HOME/.episode-matcher/
     let model_dir = env::var("HOME")
-        .map(|home| PathBuf::from(home).join(".ocrs"))
-        .unwrap_or_else(|_| PathBuf::from(".ocrs"));
+        .map(|home| PathBuf::from(home).join(".episode-matcher"))
+        .unwrap_or_else(|_| PathBuf::from(".episode-matcher"));
 
     // Create model directory if it doesn't exist
     if !model_dir.exists() {

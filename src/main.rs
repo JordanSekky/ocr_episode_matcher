@@ -41,6 +41,13 @@ fn main() {
         std::process::exit(1);
     }
 
+    if let Err(e) = run(cli) {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
+}
+
+fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Get TVDB API key
     let api_key = match config::get_tvdb_api_key() {
         Ok(key) => key,
@@ -87,28 +94,65 @@ fn main() {
         println!("Using cached episode data for series {}", show_id);
     }
 
-    // Process input (file or directory)
-    if cli.input.is_file() {
-        if let Err(e) = process_file(&cli.input, &api_key, &show_id, cli.no_confirm, &mut cache) {
-            eprintln!("Error processing file: {}", e);
-            std::process::exit(1);
+    // Process initial input
+    process_input_path(&cli.input, &api_key, &show_id, cli.no_confirm, &mut cache)?;
+
+    // Prompt for additional paths
+    loop {
+        print!("\nEnter another file or directory path (or press Enter to exit): ");
+        io::stdout().flush()?;
+
+        let mut input_path = String::new();
+        io::stdin().read_line(&mut input_path)?;
+        let mut input_path = input_path.trim().to_string();
+
+        if input_path.is_empty() {
+            break;
         }
-    } else if cli.input.is_dir() {
-        if let Err(e) =
-            process_directory(&cli.input, &api_key, &show_id, cli.no_confirm, &mut cache)
+
+        // Remove surrounding quotes if present
+        if (input_path.starts_with('"') && input_path.ends_with('"'))
+            || (input_path.starts_with('\'') && input_path.ends_with('\''))
         {
-            eprintln!("Error processing directory: {}", e);
-            std::process::exit(1);
+            input_path = input_path[1..input_path.len() - 1].to_string();
         }
-    } else {
-        eprintln!("Error: Input path is neither a file nor a directory");
-        std::process::exit(1);
+
+        let path = PathBuf::from(&input_path);
+        if !path.exists() {
+            eprintln!("Error: Path does not exist: {:?}", path);
+            continue;
+        }
+
+        if let Err(e) = process_input_path(&path, &api_key, &show_id, cli.no_confirm, &mut cache) {
+            eprintln!("Error processing path: {}", e);
+            // Continue to allow user to try another path
+        }
     }
 
     // Save cache before exiting
     if let Err(e) = cache.save() {
         eprintln!("Warning: Failed to save cache: {}", e);
     }
+
+    Ok(())
+}
+
+fn process_input_path(
+    input_path: &Path,
+    api_key: &str,
+    show_id: &str,
+    skip_confirm: bool,
+    cache: &mut Cache,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if input_path.is_file() {
+        process_file(input_path, api_key, show_id, skip_confirm, cache)?;
+    } else if input_path.is_dir() {
+        process_directory(input_path, api_key, show_id, skip_confirm, cache)?;
+    } else {
+        return Err("Input path is neither a file nor a directory".into());
+    }
+
+    Ok(())
 }
 
 fn preload_cache(
