@@ -1,93 +1,213 @@
-use ocrs::{ImageSource, OcrEngine, OcrEngineParams};
-use regex::Regex;
-use rten::Model;
-use std::env;
+mod config;
+mod ocr;
+mod rename;
+mod tvdb;
+
+use clap::Parser;
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use tempfile::TempDir;
+use tvdb::TvdbClient;
+
+#[derive(Parser)]
+#[command(name = "episode-matcher")]
+#[command(about = "Extract production codes from video files and rename them using TVDB data")]
+struct Cli {
+    /// Input file or directory
+    #[arg(short = 'i', long = "input", required = true)]
+    input: PathBuf,
+
+    /// Show name to search in TVDB
+    #[arg(long)]
+    show: Option<String>,
+
+    /// Direct TVDB show ID
+    #[arg(long)]
+    show_id: Option<String>,
+
+    /// Skip confirmation prompts
+    #[arg(long)]
+    no_confirm: bool,
+}
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        eprintln!("Usage: {} <path_to_mkv_file>", args[0]);
+    let cli = Cli::parse();
+
+    // Validate input path exists
+    if !cli.input.exists() {
+        eprintln!("Error: Input path does not exist: {:?}", cli.input);
         std::process::exit(1);
     }
 
-    let mkv_path = &args[1];
-
-    // Validate input file exists
-    if !Path::new(mkv_path).exists() {
-        eprintln!("Error: File not found: {}", mkv_path);
-        std::process::exit(1);
-    }
-
-    // Extract episode number
-    match extract_episode_number(mkv_path) {
-        Ok(Some(episode_num)) => {
-            println!("{}", episode_num);
-        }
-        Ok(None) => {
-            eprintln!("Error: Episode number not found in video");
-            std::process::exit(1);
-        }
+    // Get TVDB API key
+    let api_key = match config::get_tvdb_api_key() {
+        Ok(key) => key,
         Err(e) => {
             eprintln!("Error: {}", e);
             std::process::exit(1);
         }
-    }
-}
+    };
 
-fn extract_episode_number(mkv_path: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    // Create temporary directory for frames
-    let temp_dir = TempDir::new()?;
-    let temp_path = temp_dir.path();
-
-    // Extract frames from last 15 seconds at 1 fps
-    let output_pattern = temp_path.join("frame_%04d.png");
-    let output_pattern_str = output_pattern.to_str().ok_or("Invalid temp path")?;
-
-    let ffmpeg_output = Command::new("ffmpeg")
-        .arg("-sseof")
-        .arg("-15")
-        .arg("-i")
-        .arg(mkv_path)
-        .arg("-vf")
-        .arg("fps=1")
-        .arg("-y")
-        .arg(output_pattern_str)
-        .output();
-
-    let ffmpeg_output = match ffmpeg_output {
-        Ok(output) => output,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(
-                "FFmpeg not found. Please install ffmpeg and ensure it's in your PATH.".into(),
-            );
+    // Determine show ID
+    let show_id = match (cli.show, cli.show_id) {
+        (Some(show_name), None) => match search_and_select_show(&api_key, &show_name) {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("Error searching for show: {}", e);
+                std::process::exit(1);
+            }
+        },
+        (None, Some(id)) => id,
+        (Some(_), Some(_)) => {
+            eprintln!("Error: Cannot specify both --show and --show-id");
+            std::process::exit(1);
         }
-        Err(e) => {
-            return Err(format!("Failed to execute ffmpeg: {}", e).into());
+        (None, None) => {
+            eprintln!("Error: Must specify either --show or --show-id");
+            std::process::exit(1);
         }
     };
 
-    if !ffmpeg_output.status.success() {
-        let stderr = String::from_utf8_lossy(&ffmpeg_output.stderr);
-        return Err(format!("FFmpeg error: {}", stderr).into());
+    // Process input (file or directory)
+    if cli.input.is_file() {
+        if let Err(e) = process_file(&cli.input, &api_key, &show_id, cli.no_confirm) {
+            eprintln!("Error processing file: {}", e);
+            std::process::exit(1);
+        }
+    } else if cli.input.is_dir() {
+        if let Err(e) = process_directory(&cli.input, &api_key, &show_id, cli.no_confirm) {
+            eprintln!("Error processing directory: {}", e);
+            std::process::exit(1);
+        }
+    } else {
+        eprintln!("Error: Input path is neither a file nor a directory");
+        std::process::exit(1);
+    }
+}
+
+fn search_and_select_show(
+    api_key: &str,
+    query: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut client = TvdbClient::new(api_key.to_string());
+    client.login()?;
+
+    let results = client.search_series(query)?;
+
+    if results.is_empty() {
+        return Err(format!("No shows found matching '{}'", query).into());
     }
 
-    // Initialize OCR engine with models
-    let ocr_engine = create_ocr_engine()?;
+    if results.len() == 1 {
+        return Ok(results[0].tvdb_id.clone());
+    }
 
-    // Regex pattern for episode number format #3X22
-    let re = Regex::new(r"#\d+X\d+")?;
+    // Multiple results - let user select
+    println!("Multiple shows found. Please select one:");
+    for (i, result) in results.iter().enumerate() {
+        let name = result
+            .name
+            .as_ref()
+            .and_then(|n| n.get("eng"))
+            .or_else(|| result.name.as_ref().and_then(|n| n.values().next()))
+            .map(|s| s.as_str())
+            .unwrap_or("Unknown");
+        println!("  {}: {} (ID: {})", i + 1, name, result.tvdb_id);
+    }
 
-    // Process extracted frames
-    let mut frame_files: Vec<PathBuf> = fs::read_dir(temp_path)?
+    print!("Enter number (1-{}): ", results.len());
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let choice: usize = input.trim().parse().map_err(|_| "Invalid selection")?;
+
+    if choice < 1 || choice > results.len() {
+        return Err("Invalid selection".into());
+    }
+
+    Ok(results[choice - 1].tvdb_id.clone())
+}
+
+fn process_file(
+    file_path: &Path,
+    api_key: &str,
+    show_id: &str,
+    skip_confirm: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if file_path.extension().and_then(|s| s.to_str()) != Some("mkv") {
+        eprintln!("Skipping non-MKV file: {:?}", file_path);
+        return Ok(());
+    }
+
+    println!("Processing: {:?}", file_path);
+
+    // Extract production code
+    let production_code = match ocr::extract_production_code(file_path.to_str().unwrap()) {
+        Ok(Some(code)) => code,
+        Ok(None) => {
+            eprintln!(
+                "Warning: Could not extract production code from {:?}",
+                file_path
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            eprintln!("Error extracting production code: {}", e);
+            return Ok(());
+        }
+    };
+
+    println!("Found production code: {}", production_code);
+
+    // Lookup episode in TVDB
+    let mut client = TvdbClient::new(api_key.to_string());
+    client.login()?;
+
+    let episode = match client.find_episode_by_production_code(show_id, &production_code)? {
+        Some(ep) => ep,
+        None => {
+            eprintln!(
+                "Warning: Episode not found in TVDB for production code: {}",
+                production_code
+            );
+            return Ok(());
+        }
+    };
+
+    // Get show name
+    let show_name = client.get_series_name(show_id)?;
+
+    // Generate new filename
+    let new_filename = rename::generate_filename(
+        &show_name,
+        episode.season_number,
+        episode.episode_number,
+        &episode.name,
+    );
+
+    // Find unique filename if needed
+    let directory = file_path.parent().unwrap_or(Path::new("."));
+    let new_path = rename::find_unique_filename(directory, &new_filename);
+
+    // Rename file
+    rename::rename_file(file_path, &new_path, skip_confirm)?;
+
+    Ok(())
+}
+
+fn process_directory(
+    dir_path: &Path,
+    api_key: &str,
+    show_id: &str,
+    skip_confirm: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let entries = fs::read_dir(dir_path)?;
+    let mut mkv_files: Vec<PathBuf> = entries
         .filter_map(|entry| {
             let entry = entry.ok()?;
             let path = entry.path();
-            if path.extension()?.to_str()? == "png" {
+            if path.is_file() && path.extension()?.to_str()? == "mkv" {
                 Some(path)
             } else {
                 None
@@ -95,151 +215,17 @@ fn extract_episode_number(mkv_path: &str) -> Result<Option<String>, Box<dyn std:
         })
         .collect();
 
-    // Sort frames by name to process in order
-    frame_files.sort();
+    mkv_files.sort();
 
-    // Try OCR on each frame until we find the episode number
-    for frame_path in frame_files {
-        // Load image from file
-        let img = match image::open(&frame_path) {
-            Ok(img) => img,
-            Err(e) => {
-                eprintln!("Warning: Failed to load image {:?}: {}", frame_path, e);
-                continue;
-            }
-        };
+    println!("Found {} MKV file(s) to process", mkv_files.len());
 
-        // Convert to grayscale for OCR
-        let gray_img = img.to_luma8();
-        let (width, height) = gray_img.dimensions();
-
-        // Get image bytes
-        let image_bytes = gray_img.as_raw();
-
-        // Create image source for OCR using from_bytes
-        let image_source = match ImageSource::from_bytes(image_bytes, (width, height)) {
-            Ok(source) => source,
-            Err(e) => {
-                eprintln!(
-                    "Warning: Failed to create image source {:?}: {}",
-                    frame_path, e
-                );
-                continue;
-            }
-        };
-
-        // Prepare OCR input (takes ImageSource by value, not reference)
-        let ocr_input = match ocr_engine.prepare_input(image_source) {
-            Ok(input) => input,
-            Err(e) => {
-                eprintln!(
-                    "Warning: Failed to prepare OCR input {:?}: {}",
-                    frame_path, e
-                );
-                continue;
-            }
-        };
-
-        // Perform OCR using convenience method that extracts all text
-        match ocr_engine.get_text(&ocr_input) {
-            Ok(text) => {
-                // Search for episode number pattern in the extracted text
-                if let Some(mat) = re.find(&text) {
-                    return Ok(Some(mat.as_str().to_string()));
-                }
-            }
-            Err(e) => {
-                // Continue to next frame if OCR fails on this one
-                eprintln!("Warning: OCR failed on frame {:?}: {}", frame_path, e);
-                continue;
-            }
+    for file_path in mkv_files {
+        if let Err(e) = process_file(&file_path, api_key, show_id, skip_confirm) {
+            eprintln!("Error processing {:?}: {}", file_path, e);
+            // Continue processing other files
         }
+        println!(); // Blank line between files
     }
-
-    Ok(None)
-}
-
-fn create_ocr_engine() -> Result<OcrEngine, Box<dyn std::error::Error>> {
-    const DETECTION_MODEL_URL: &str =
-        "https://ocrs-models.s3-accelerate.amazonaws.com/text-detection.rten";
-    const RECOGNITION_MODEL_URL: &str =
-        "https://ocrs-models.s3-accelerate.amazonaws.com/text-recognition.rten";
-
-    // Determine model directory - prefer $HOME/.ocrs/
-    let model_dir = env::var("HOME")
-        .map(|home| PathBuf::from(home).join(".ocrs"))
-        .unwrap_or_else(|_| PathBuf::from(".ocrs"));
-
-    // Create model directory if it doesn't exist
-    if !model_dir.exists() {
-        fs::create_dir_all(&model_dir)?;
-    }
-
-    let detection_model_path = model_dir.join("text-detection.rten");
-    let recognition_model_path = model_dir.join("text-recognition.rten");
-
-    // Check environment variables first
-    let detection_model_path = env::var("OCRS_DETECTION_MODEL")
-        .ok()
-        .map(PathBuf::from)
-        .filter(|p| p.exists())
-        .unwrap_or(detection_model_path);
-
-    let recognition_model_path = env::var("OCRS_RECOGNITION_MODEL")
-        .ok()
-        .map(PathBuf::from)
-        .filter(|p| p.exists())
-        .unwrap_or(recognition_model_path);
-
-    // Download detection model if it doesn't exist
-    if !detection_model_path.exists() {
-        eprintln!(
-            "Downloading detection model to {:?}...",
-            detection_model_path
-        );
-        download_file(DETECTION_MODEL_URL, &detection_model_path)?;
-    }
-
-    // Download recognition model if it doesn't exist
-    if !recognition_model_path.exists() {
-        eprintln!(
-            "Downloading recognition model to {:?}...",
-            recognition_model_path
-        );
-        download_file(RECOGNITION_MODEL_URL, &recognition_model_path)?;
-    }
-
-    // Load models
-    let detection_model = Model::load_file(&detection_model_path).map_err(|e| {
-        format!(
-            "Failed to load detection model from {:?}: {}",
-            detection_model_path, e
-        )
-    })?;
-
-    let recognition_model = Model::load_file(&recognition_model_path).map_err(|e| {
-        format!(
-            "Failed to load recognition model from {:?}: {}",
-            recognition_model_path, e
-        )
-    })?;
-
-    Ok(OcrEngine::new(OcrEngineParams {
-        detection_model: Some(detection_model),
-        recognition_model: Some(recognition_model),
-        ..Default::default()
-    })?)
-}
-
-fn download_file(url: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let response = reqwest::blocking::get(url)?;
-    if !response.status().is_success() {
-        return Err(format!("Failed to download {}: HTTP {}", url, response.status()).into());
-    }
-
-    let mut file = fs::File::create(path)?;
-    let content = response.bytes()?;
-    file.write_all(&content)?;
 
     Ok(())
 }
