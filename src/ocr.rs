@@ -50,9 +50,12 @@ pub fn extract_production_code(
     // Initialize OCR engine with models
     let ocr_engine = create_ocr_engine()?;
 
-    // Regex pattern for production code format #3X22 or #1X79
-    // Allow optional spaces around X (e.g., "#5X 10" or "#5 X10" or "#5 X 10")
-    let re = Regex::new(r"#\d+\s*X\s*\d+")?;
+    // Regex pattern for production code format:
+    // - Seasons 1-5: #3X22 or #1X79 (season X episode)
+    // - Season 6-9: #6ABX08 (season 6, episode 6) - format: #<season>ABX<episode>
+    // - Season 10-11: #1AYW01, #2AYW01 - format: #<season>AYWX<episode>
+    // Allow optional spaces around X, case-insensitive
+    let re = Regex::new(r"(?i)#(\d+)([A-Z]*)\s*X\s*(\d+)")?;
 
     // Process extracted frames
     let mut frame_files: Vec<PathBuf> = fs::read_dir(temp_path)?
@@ -116,11 +119,32 @@ pub fn extract_production_code(
         match ocr_engine.get_text(&ocr_input) {
             Ok(text) => {
                 // Search for production code pattern in the extracted text
-                if let Some(mat) = re.find(&text) {
-                    // Remove the # prefix if present and normalize spaces
-                    let code = mat.as_str().trim_start_matches('#');
-                    // Remove spaces within the production code (e.g., "5X 10" -> "5X10")
-                    let normalized = code.replace(' ', "");
+                if let Some(captures) = re.captures(&text) {
+                    let season = captures.get(1).unwrap().as_str();
+                    let letters = captures.get(2).unwrap().as_str();
+                    let episode = captures.get(3).unwrap().as_str();
+
+                    // Remove leading zeros from episode number only if there are 3+ digits
+                    let episode_normalized = if episode.len() >= 3 {
+                        let ep = episode.trim_start_matches('0');
+                        if ep.is_empty() {
+                            "0"
+                        } else {
+                            ep
+                        }
+                    } else {
+                        episode
+                    };
+
+                    // Reconstruct production code: season + letters + X + episode
+                    // Normalize letters to lowercase to match cache format (cache stores: 6abx08, 1ayw01, etc.)
+                    let letters_lower = letters.to_lowercase();
+                    let normalized = if letters_lower.is_empty() {
+                        format!("{}x{}", season, episode_normalized)
+                    } else {
+                        format!("{}{}x{}", season, letters_lower, episode_normalized)
+                    };
+
                     return Ok(Some(normalized));
                 }
             }
