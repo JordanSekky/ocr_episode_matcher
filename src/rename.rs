@@ -29,11 +29,11 @@ fn sanitize_filename(name: &str) -> String {
         .to_string()
 }
 
-pub fn find_unique_filename(directory: &Path, base_filename: &str) -> PathBuf {
+pub fn find_unique_filename(old_path: &Path, directory: &Path, base_filename: &str) -> PathBuf {
     let mut path = directory.join(base_filename);
     let mut counter = 1;
 
-    while path.exists() {
+    while path.exists() && path.to_string_lossy() != old_path.to_string_lossy() {
         let stem = Path::new(base_filename)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -70,6 +70,10 @@ pub fn rename_file(
     new_path: &Path,
     skip_confirm: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if old_path.to_string_lossy() == new_path.to_string_lossy() {
+        println!("File is already named correctly.");
+        return Ok(());
+    }
     if !skip_confirm && !confirm_rename(old_path, new_path) {
         println!("Skipped.");
         return Ok(());

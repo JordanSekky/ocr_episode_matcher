@@ -258,7 +258,7 @@ fn process_file(
 
     // Find unique filename if needed
     let directory = file_path.parent().unwrap_or(Path::new("."));
-    let new_path = rename::find_unique_filename(directory, &new_filename);
+    let new_path = rename::find_unique_filename(file_path, directory, &new_filename);
 
     // Rename file
     rename::rename_file(file_path, &new_path, skip_confirm)?;
