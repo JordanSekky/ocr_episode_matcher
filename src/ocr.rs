@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
-pub fn extract_production_code(mkv_path: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
+pub fn extract_production_code(
+    mkv_path: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
     // Create temporary directory for frames
     let temp_dir = TempDir::new()?;
     let temp_path = temp_dir.path();
@@ -49,7 +51,8 @@ pub fn extract_production_code(mkv_path: &str) -> Result<Option<String>, Box<dyn
     let ocr_engine = create_ocr_engine()?;
 
     // Regex pattern for production code format #3X22 or #1X79
-    let re = Regex::new(r"#\d+X\d+")?;
+    // Allow optional spaces around X (e.g., "#5X 10" or "#5 X10" or "#5 X 10")
+    let re = Regex::new(r"#\d+\s*X\s*\d+")?;
 
     // Process extracted frames
     let mut frame_files: Vec<PathBuf> = fs::read_dir(temp_path)?
@@ -114,9 +117,11 @@ pub fn extract_production_code(mkv_path: &str) -> Result<Option<String>, Box<dyn
             Ok(text) => {
                 // Search for production code pattern in the extracted text
                 if let Some(mat) = re.find(&text) {
-                    // Remove the # prefix if present
+                    // Remove the # prefix if present and normalize spaces
                     let code = mat.as_str().trim_start_matches('#');
-                    return Ok(Some(code.to_string()));
+                    // Remove spaces within the production code (e.g., "5X 10" -> "5X10")
+                    let normalized = code.replace(' ', "");
+                    return Ok(Some(normalized));
                 }
             }
             Err(e) => {
@@ -214,4 +219,3 @@ fn download_file(url: &str, path: &Path) -> Result<(), Box<dyn std::error::Error
 
     Ok(())
 }
-
