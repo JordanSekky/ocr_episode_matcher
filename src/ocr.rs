@@ -1,14 +1,30 @@
-use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Result;
 use regex::Regex;
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Arc;
 use tempfile::TempDir;
 use tesseract_rs::TesseractAPI;
+
+#[cfg(target_os = "macos")]
+const ENG: &[u8] = include_bytes!(concat!(
+    env!("HOME"),
+    "/Library/Application Support/tesseract-rs/tessdata/eng.traineddata"
+));
+
+#[cfg(target_os = "linux")]
+const ENG: &[u8] = include_bytes!(concat!(
+    env!("HOME"),
+    "/.tesseract-rs/tessdata/eng.traineddata"
+));
+
+#[cfg(target_os = "windows")]
+const ENG: &[u8] = include_bytes!(concat!(
+    env!("APPDATA"),
+    "/tesseract-rs/tessdata/eng.traineddata"
+));
 
 pub fn extract_production_code_candidates(mkv_path: &str) -> Result<Vec<String>> {
     // Create temporary directory for frames
@@ -48,8 +64,7 @@ pub fn extract_production_code_candidates(mkv_path: &str) -> Result<Vec<String>>
     }
 
     // Initialize OCR engine
-    let tessdata_dir = get_tessdata_dir()?;
-    let api = Arc::new(create_ocr_engine(&tessdata_dir)?);
+    let api = create_ocr_engine()?;
 
     // Regex pattern for production code format:
     // - Seasons 1-5: #3X22 or #1X79 (season X episode)
@@ -92,11 +107,8 @@ pub fn extract_production_code_candidates(mkv_path: &str) -> Result<Vec<String>>
         let (width, height) = rgb_img.dimensions();
         let image_data = rgb_img.into_raw();
 
-        // Clone API for this thread (tesseract-rs API is cloneable)
-        let api_clone = api.clone();
-
         // Perform OCR
-        match api_clone.set_image(
+        match api.set_image(
             &image_data,
             width as i32,
             height as i32,
@@ -104,7 +116,7 @@ pub fn extract_production_code_candidates(mkv_path: &str) -> Result<Vec<String>>
             3 * width as i32, // bytes per line
         ) {
             Ok(_) => {
-                match api_clone.get_utf8_text() {
+                match api.get_utf8_text() {
                     Ok(text) => {
                         // Strip all whitespace from the text before matching
                         let text_no_whitespace: String = text
@@ -142,71 +154,10 @@ pub fn extract_production_code_candidates(mkv_path: &str) -> Result<Vec<String>>
     Ok(candidates)
 }
 
-fn create_ocr_engine(tessdata_dir: &Path) -> Result<TesseractAPI> {
+fn create_ocr_engine() -> Result<TesseractAPI> {
     let api = TesseractAPI::new();
-
     // Initialize with tessdata directory and English language
-    let tessdata_str = tessdata_dir
-        .to_str()
-        .ok_or_else(|| anyhow!("Invalid tessdata directory path"))?;
-    api.init(tessdata_str, "eng")?;
+    api.init_5(ENG, ENG.len() as i32, "eng", 3, &[])?;
 
     Ok(api)
-}
-
-fn get_tessdata_dir() -> Result<PathBuf> {
-    // Check environment variable first
-    if let Ok(tessdata) = env::var("TESSDATA_PREFIX") {
-        let path = PathBuf::from(tessdata);
-        if path.exists() {
-            return Ok(path);
-        }
-    }
-
-    // Check common system locations
-    let common_paths = vec![
-        PathBuf::from("/usr/share/tesseract-ocr/5/tessdata"),
-        PathBuf::from("/usr/share/tesseract-ocr/4/tessdata"),
-        PathBuf::from("/usr/share/tesseract-ocr/tessdata"),
-        PathBuf::from("/usr/local/share/tesseract-ocr/tessdata"),
-        PathBuf::from("/opt/homebrew/share/tesseract-ocr/5/tessdata"),
-        PathBuf::from("/opt/homebrew/share/tesseract-ocr/4/tessdata"),
-        PathBuf::from("/opt/homebrew/share/tessdata"),
-    ];
-
-    for path in common_paths {
-        if path.exists() && path.join("eng.traineddata").exists() {
-            return Ok(path);
-        }
-    }
-
-    // Fallback: use local directory
-    let model_dir = env::var("HOME")
-        .map(|home| PathBuf::from(home).join(".episode-matcher"))
-        .unwrap_or_else(|_| PathBuf::from(".episode-matcher"));
-
-    let tessdata_dir = model_dir.join("tessdata");
-
-    // Create directory if it doesn't exist
-    if !tessdata_dir.exists() {
-        fs::create_dir_all(&tessdata_dir)?;
-    }
-
-    // Check if eng.traineddata exists, if not, provide instructions
-    let eng_data = tessdata_dir.join("eng.traineddata");
-    if !eng_data.exists() {
-        eprintln!(
-            "Warning: Tesseract data files not found. Please install tesseract-ocr and eng language data."
-        );
-        eprintln!("On macOS: brew install tesseract tesseract-lang");
-        eprintln!("On Ubuntu/Debian: sudo apt-get install tesseract-ocr tesseract-ocr-eng");
-        eprintln!(
-            "Or download eng.traineddata from https://github.com/tesseract-ocr/tessdata and place it in: {tessdata_dir:?}"
-        );
-        bail!(
-            "Tesseract data files not found. Please install tesseract-ocr with English language support."
-        );
-    }
-
-    Ok(tessdata_dir)
 }
