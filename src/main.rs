@@ -237,11 +237,13 @@ fn process_file(
         (Some(episode), _) => Some(episode),
         (None, Some(prompt_size)) => {
             if file_path.metadata()?.len() > prompt_size {
-                println!("Please enter the production code manually.");
+                println!("Please enter the production code or SXXEXX manually.");
                 let mut input = String::new();
                 io::stdin().read_line(&mut input)?;
                 let production_code = input.trim().to_string();
-                cache.get_episode(series_id, &production_code)
+                cache
+                    .get_episode(series_id, &production_code)
+                    .or(cache.get_episode_by_sxxexx(series_id, &production_code))
             } else {
                 None
             }
@@ -250,7 +252,7 @@ fn process_file(
     };
 
     let Some(episode) = episode else {
-        eprintln!("Warning: No production code found for {:?}", file_path);
+        eprintln!("Warning: No production code found for {file_path:?}");
         return Ok(());
     };
 
@@ -303,7 +305,7 @@ fn process_directory(
             cache,
             prompt_size,
         ) {
-            eprintln!("Error processing {:?}: {}", file_path, e);
+            eprintln!("Error processing {file_path:?}: {e}");
             // Continue processing other files
         }
         println!(); // Blank line between files

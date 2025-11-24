@@ -59,6 +59,22 @@ impl Cache {
             .and_then(|episodes| episodes.get(&key))
     }
 
+    pub fn get_episode_by_sxxexx(
+        &self,
+        series_id: &str,
+        identifier: &str,
+    ) -> Option<&EpisodeCache> {
+        // Lookup is case-insensitive, matches S01E01 or s01e01 etc.
+        let re = regex::Regex::new(r"(?i)^s(\d{1,2})e(\d{1,2})$").ok()?;
+        let caps = re.captures(identifier)?;
+        let season: u32 = caps.get(1)?.as_str().parse().ok()?;
+        let episode: u32 = caps.get(2)?.as_str().parse().ok()?;
+        self.episodes
+            .get(series_id)?
+            .values()
+            .find(|ep| ep.season_number == season && ep.episode_number == episode)
+    }
+
     pub fn set_episode(
         &mut self,
         series_id: String,

@@ -81,7 +81,7 @@ episode-matcher "/path/to/dir1" "/path/to/dir2" "/path/to/file.mkv" --show-id 77
 - `--show <name>` - Show name to search in TheTVDB (will prompt for selection if multiple matches)
 - `--show-id <id>` - Direct TheTVDB show ID (faster, no search needed)
 - `--no-confirm` - Skip confirmation prompts (useful for batch processing)
-
+- `--prompt-size <bytes>` - For files larger than this size, prompt for production code manually if OCR fails
 ### Examples
 
 **Using show name:**
@@ -104,12 +104,18 @@ episode-matcher "/path/to/season1" "/path/to/season2" "/path/to/season3" --show-
 episode-matcher -r "/path/to/videos" --show-id 77398
 ```
 
+**Prompt for production code on large files:**
+```bash
+episode-matcher "/path/to/videos" --show-id 77398 --prompt-size 1073741824
+```
+This will prompt you to manually enter the production code for files larger than 1GB (1073741824 bytes), if the OCR does not find a valid production code. 
+
 ## How It Works
 
 1. **Frame Extraction**: Extracts frames from the last 15 seconds of the video at 1 fps
 2. **OCR Processing**: Uses OCR to find production codes in the extracted frames
-4. **TVDB Lookup**: Queries TheTVDB API using the production code to get episode metadata
-5. **File Renaming**: Renames the file using the format: `{Show Name} - S{season}E{episode} - {Episode Title}.mkv`
+3. **TVDB Lookup**: Queries TheTVDB API using the production code to get episode metadata
+4. **File Renaming**: Renames the file using the format: `{Show Name} - S{season}E{episode} - {Episode Title}.mkv`
 
 ## Production Code Formats Supported
 
