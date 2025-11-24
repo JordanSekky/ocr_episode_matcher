@@ -45,7 +45,7 @@ pub fn find_unique_filename(old_path: &Path, directory: &Path, base_filename: &s
             .and_then(|s| s.to_str())
             .unwrap_or("mkv");
 
-        let new_filename = format!("{} [copy {}].{}", stem, counter, extension);
+        let new_filename = format!("{stem} [copy {counter}].{extension}");
         path = directory.join(new_filename);
         counter += 1;
     }

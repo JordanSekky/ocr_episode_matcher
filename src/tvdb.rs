@@ -88,7 +88,7 @@ impl TvdbClient {
             "apikey": self.api_key
         });
         let response = client
-            .post(&format!("{}/login", TVDB_API_BASE))
+            .post(format!("{TVDB_API_BASE}/login"))
             .header("Content-Type", "application/json")
             .body(body.to_string())
             .send()?;
@@ -114,7 +114,7 @@ impl TvdbClient {
 
         let client = reqwest::blocking::Client::new();
         let response = client
-            .get(&format!("{}/search", TVDB_API_BASE))
+            .get(format!("{TVDB_API_BASE}/search"))
             .header(
                 "Authorization",
                 format!("Bearer {}", self.token.as_ref().unwrap()),
@@ -135,7 +135,7 @@ impl TvdbClient {
 
         let client = reqwest::blocking::Client::new();
         let response = client
-            .get(&format!("{}/series/{}", TVDB_API_BASE, series_id))
+            .get(format!("{TVDB_API_BASE}/series/{series_id}"))
             .header(
                 "Authorization",
                 format!("Bearer {}", self.token.as_ref().unwrap()),
@@ -164,7 +164,7 @@ impl TvdbClient {
         let mut all_episodes = Vec::new();
 
         loop {
-            let url = format!("{}/series/{}/episodes/default", TVDB_API_BASE, series_id);
+            let url = format!("{TVDB_API_BASE}/series/{series_id}/episodes/default");
             let response = client
                 .get(&url)
                 .header(
@@ -181,7 +181,7 @@ impl TvdbClient {
                 if status == 404 {
                     break;
                 }
-                bail!("TVDB episodes lookup failed: HTTP {}", status);
+                bail!("TVDB episodes lookup failed: HTTP {status}");
             }
 
             let episodes_resp: EpisodesResponse = serde_json::from_str(&response_text)?;

@@ -85,7 +85,7 @@ impl Cache {
         let key = production_code.to_lowercase();
         self.episodes
             .entry(series_id)
-            .or_insert_with(HashMap::new)
+            .or_default()
             .insert(key, episode);
     }
 

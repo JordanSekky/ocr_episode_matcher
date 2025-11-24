@@ -45,7 +45,7 @@ fn main() {
     let cli = Cli::parse();
 
     if let Err(e) = run(cli) {
-        eprintln!("Error: {}", e);
+        eprintln!("Error: {e}");
         std::process::exit(1);
     }
 }
@@ -63,7 +63,7 @@ fn run(cli: Cli) -> Result<()> {
         (Some(show_name), None) => match search_and_select_show(&mut client, &show_name) {
             Ok(id) => id,
             Err(e) => {
-                bail!("Error searching for show: {}", e);
+                bail!("Error searching for show: {e}");
             }
         },
         (None, Some(id)) => id,
@@ -79,21 +79,21 @@ fn run(cli: Cli) -> Result<()> {
     if !cache.has_series_episodes(&show_id) {
         preload_cache(&mut client, &show_id, &mut cache)?;
     } else {
-        println!("Using cached episode data for series {}", show_id);
+        println!("Using cached episode data for series {show_id}");
     }
 
     // Get show name from cache or API
     let show_name = match get_show_name(&mut client, &show_id, &mut cache) {
         Ok(name) => name,
         Err(e) => {
-            bail!("Error getting show name: {}", e);
+            bail!("Error getting show name: {e}");
         }
     };
 
     // Validate and process all input paths
     for input_path in &cli.inputs {
         if !input_path.exists() {
-            eprintln!("Error: Input path does not exist: {:?}", input_path);
+            eprintln!("Error: Input path does not exist: {input_path:?}");
             continue;
         }
 
@@ -106,14 +106,14 @@ fn run(cli: Cli) -> Result<()> {
             &mut cache,
             cli.prompt_size,
         ) {
-            eprintln!("Error processing path {:?}: {}", input_path, e);
+            eprintln!("Error processing path {input_path:?}: {e}");
             // Continue processing other paths
         }
     }
 
     // Save cache before exiting
     if let Err(e) = cache.save() {
-        eprintln!("Warning: Failed to save cache: {}", e);
+        eprintln!("Warning: Failed to save cache: {e}");
     }
 
     Ok(())
@@ -162,7 +162,7 @@ fn preload_cache(client: &mut TvdbClient, series_id: &str, cache: &mut Cache) ->
     }
 
     // Preload all episodes for this series
-    println!("Preloading episode cache for series {}...", series_id);
+    println!("Preloading episode cache for series {series_id}...");
     client.preload_episodes(series_id, cache)?;
     println!("Cache preloaded successfully.");
 
@@ -173,7 +173,7 @@ fn search_and_select_show(client: &mut TvdbClient, query: &str) -> Result<String
     let results = client.search_series(query)?;
 
     if results.is_empty() {
-        bail!("No shows found matching '{}'", query);
+        bail!("No shows found matching '{query}'");
     }
 
     if results.len() == 1 {
@@ -219,10 +219,10 @@ fn process_file(
     prompt_size: Option<u64>,
 ) -> Result<()> {
     if file_path.extension().and_then(|s| s.to_str()) != Some("mkv") {
-        bail!("Skipping non-MKV file: {:?}", file_path);
+        bail!("Skipping non-MKV file: {file_path:?}");
     }
 
-    println!("Processing: {:?}", file_path);
+    println!("Processing: {file_path:?}");
 
     // Extract production code
     let production_code_candidates =

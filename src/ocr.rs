@@ -39,13 +39,13 @@ pub fn extract_production_code_candidates(mkv_path: &str) -> Result<Vec<String>>
             bail!("FFmpeg not found. Please install ffmpeg and ensure it's in your PATH.");
         }
         Err(e) => {
-            bail!("Failed to execute ffmpeg: {}", e);
+            bail!("Failed to execute ffmpeg: {e}");
         }
     };
 
     if !ffmpeg_output.status.success() {
         let stderr = String::from_utf8_lossy(&ffmpeg_output.stderr);
-        bail!("FFmpeg error: {}", stderr);
+        bail!("FFmpeg error: {stderr}");
     }
 
     // Initialize OCR engine with models
@@ -82,7 +82,7 @@ pub fn extract_production_code_candidates(mkv_path: &str) -> Result<Vec<String>>
         let img = match image::open(&frame_path) {
             Ok(img) => img,
             Err(e) => {
-                eprintln!("Warning: Failed to load image {:?}: {}", frame_path, e);
+                eprintln!("Warning: Failed to load image {frame_path:?}: {e}");
                 continue;
             }
         };
@@ -99,8 +99,7 @@ pub fn extract_production_code_candidates(mkv_path: &str) -> Result<Vec<String>>
             Ok(source) => source,
             Err(e) => {
                 eprintln!(
-                    "Warning: Failed to create image source {:?}: {}",
-                    frame_path, e
+                    "Warning: Failed to create image source {frame_path:?}: {e}"
                 );
                 continue;
             }
@@ -111,8 +110,7 @@ pub fn extract_production_code_candidates(mkv_path: &str) -> Result<Vec<String>>
             Ok(input) => input,
             Err(e) => {
                 eprintln!(
-                    "Warning: Failed to prepare OCR input {:?}: {}",
-                    frame_path, e
+                    "Warning: Failed to prepare OCR input {frame_path:?}: {e}"
                 );
                 continue;
             }
@@ -142,12 +140,12 @@ pub fn extract_production_code_candidates(mkv_path: &str) -> Result<Vec<String>>
             }
             Err(e) => {
                 // Continue to next frame if OCR fails on this one
-                eprintln!("Warning: OCR failed on frame {:?}: {}", frame_path, e);
+                eprintln!("Warning: OCR failed on frame {frame_path:?}: {e}");
                 continue;
             }
         }
     }
-    eprintln!("Found candidates: {:?}", candidates);
+    eprintln!("Found candidates: {candidates:?}");
 
     Ok(candidates)
 }
@@ -187,8 +185,7 @@ fn create_ocr_engine() -> Result<OcrEngine> {
     // Download detection model if it doesn't exist
     if !detection_model_path.exists() {
         eprintln!(
-            "Downloading detection model to {:?}...",
-            detection_model_path
+            "Downloading detection model to {detection_model_path:?}..."
         );
         download_file(DETECTION_MODEL_URL, &detection_model_path)?;
     }
@@ -196,8 +193,7 @@ fn create_ocr_engine() -> Result<OcrEngine> {
     // Download recognition model if it doesn't exist
     if !recognition_model_path.exists() {
         eprintln!(
-            "Downloading recognition model to {:?}...",
-            recognition_model_path
+            "Downloading recognition model to {recognition_model_path:?}..."
         );
         download_file(RECOGNITION_MODEL_URL, &recognition_model_path)?;
     }
@@ -205,25 +201,21 @@ fn create_ocr_engine() -> Result<OcrEngine> {
     // Load models
     let detection_model = Model::load_file(&detection_model_path).map_err(|e| {
         anyhow!(
-            "Failed to load detection model from {:?}: {}",
-            detection_model_path,
-            e
+            "Failed to load detection model from {detection_model_path:?}: {e}"
         )
     })?;
 
     let recognition_model = Model::load_file(&recognition_model_path).map_err(|e| {
         anyhow!(
-            "Failed to load recognition model from {:?}: {}",
-            recognition_model_path,
-            e
+            "Failed to load recognition model from {recognition_model_path:?}: {e}"
         )
     })?;
 
-    Ok(OcrEngine::new(OcrEngineParams {
+    OcrEngine::new(OcrEngineParams {
         detection_model: Some(detection_model),
         recognition_model: Some(recognition_model),
         ..Default::default()
-    })?)
+    })
 }
 
 fn download_file(url: &str, path: &Path) -> Result<()> {
