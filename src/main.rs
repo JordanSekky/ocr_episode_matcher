@@ -4,6 +4,7 @@ mod ocr;
 mod rename;
 mod tvdb;
 
+use anyhow::{bail, Result};
 use cache::Cache;
 use clap::Parser;
 use std::fs;
@@ -15,9 +16,9 @@ use tvdb::TvdbClient;
 #[command(name = "episode-matcher")]
 #[command(about = "Extract production codes from video files and rename them using TVDB data")]
 struct Cli {
-    /// Input file or directory
-    #[arg(short = 'i', long = "input", required = true)]
-    input: PathBuf,
+    /// Input files or directories to process
+    #[arg(required = true)]
+    inputs: Vec<PathBuf>,
 
     /// Show name to search in TVDB
     #[arg(long)]
@@ -30,16 +31,14 @@ struct Cli {
     /// Skip confirmation prompts
     #[arg(long)]
     no_confirm: bool,
+
+    /// Recursively scan directories for MKV files
+    #[arg(short = 'r', long = "recursive")]
+    recursive: bool,
 }
 
 fn main() {
     let cli = Cli::parse();
-
-    // Validate input path exists
-    if !cli.input.exists() {
-        eprintln!("Error: Input path does not exist: {:?}", cli.input);
-        std::process::exit(1);
-    }
 
     if let Err(e) = run(cli) {
         eprintln!("Error: {}", e);
@@ -47,42 +46,34 @@ fn main() {
     }
 }
 
-fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+fn run(cli: Cli) -> Result<()> {
     // Get TVDB API key
-    let api_key = match config::get_tvdb_api_key() {
-        Ok(key) => key,
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let api_key = config::get_tvdb_api_key()?;
 
     // Load cache
     let mut cache = Cache::load();
+    let mut client = TvdbClient::new(api_key.to_string());
 
     // Determine show ID
     let show_id = match (cli.show, cli.show_id) {
-        (Some(show_name), None) => match search_and_select_show(&api_key, &show_name, &mut cache) {
+        (Some(show_name), None) => match search_and_select_show(&mut client, &show_name) {
             Ok(id) => id,
             Err(e) => {
-                eprintln!("Error searching for show: {}", e);
-                std::process::exit(1);
+                bail!("Error searching for show: {}", e);
             }
         },
         (None, Some(id)) => id,
         (Some(_), Some(_)) => {
-            eprintln!("Error: Cannot specify both --show and --show-id");
-            std::process::exit(1);
+            bail!("Error: Cannot specify both --show and --show-id");
         }
         (None, None) => {
-            eprintln!("Error: Must specify either --show or --show-id");
-            std::process::exit(1);
+            bail!("Error: Must specify either --show or --show-id");
         }
     };
 
     // Preload cache with series name and all episodes (only if not already cached)
     if !cache.has_series_episodes(&show_id) {
-        if let Err(e) = preload_cache(&api_key, &show_id, &mut cache) {
+        if let Err(e) = preload_cache(&mut client, &show_id, &mut cache) {
             eprintln!("Warning: Failed to preload cache: {}", e);
         } else {
             // Save cache after preloading
@@ -94,38 +85,32 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         println!("Using cached episode data for series {}", show_id);
     }
 
-    // Process initial input
-    process_input_path(&cli.input, &api_key, &show_id, cli.no_confirm, &mut cache)?;
-
-    // Prompt for additional paths
-    loop {
-        print!("\nEnter another file or directory path (or press Enter to exit): ");
-        io::stdout().flush()?;
-
-        let mut input_path = String::new();
-        io::stdin().read_line(&mut input_path)?;
-        let mut input_path = input_path.trim().to_string();
-
-        if input_path.is_empty() {
-            break;
+    // Get show name from cache or API
+    let show_name = match get_show_name(&mut client, &show_id, &mut cache) {
+        Ok(name) => name,
+        Err(e) => {
+            bail!("Error getting show name: {}", e);
         }
+    };
 
-        // Remove surrounding quotes if present
-        if (input_path.starts_with('"') && input_path.ends_with('"'))
-            || (input_path.starts_with('\'') && input_path.ends_with('\''))
-        {
-            input_path = input_path[1..input_path.len() - 1].to_string();
-        }
-
-        let path = PathBuf::from(&input_path);
-        if !path.exists() {
-            eprintln!("Error: Path does not exist: {:?}", path);
+    // Validate and process all input paths
+    for input_path in &cli.inputs {
+        if !input_path.exists() {
+            eprintln!("Error: Input path does not exist: {:?}", input_path);
             continue;
         }
 
-        if let Err(e) = process_input_path(&path, &api_key, &show_id, cli.no_confirm, &mut cache) {
-            eprintln!("Error processing path: {}", e);
-            // Continue to allow user to try another path
+        if let Err(e) = process_input_path(
+            input_path,
+            &show_id,
+            &show_name,
+            cli.no_confirm,
+            cli.recursive,
+            &mut client,
+            &mut cache,
+        ) {
+            eprintln!("Error processing path {:?}: {}", input_path, e);
+            // Continue processing other paths
         }
     }
 
@@ -139,30 +124,33 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
 fn process_input_path(
     input_path: &Path,
-    api_key: &str,
     show_id: &str,
+    show_name: &str,
     skip_confirm: bool,
+    recursive: bool,
+    client: &mut TvdbClient,
     cache: &mut Cache,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     if input_path.is_file() {
-        process_file(input_path, api_key, show_id, skip_confirm, cache)?;
+        process_file(input_path, show_id, show_name, skip_confirm, client, cache)?;
     } else if input_path.is_dir() {
-        process_directory(input_path, api_key, show_id, skip_confirm, cache)?;
+        process_directory(
+            input_path,
+            show_id,
+            show_name,
+            skip_confirm,
+            recursive,
+            client,
+            cache,
+        )?;
     } else {
-        return Err("Input path is neither a file nor a directory".into());
+        bail!("Input path is neither a file nor a directory");
     }
 
     Ok(())
 }
 
-fn preload_cache(
-    api_key: &str,
-    series_id: &str,
-    cache: &mut Cache,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = TvdbClient::new(api_key.to_string());
-    client.login()?;
-
+fn preload_cache(client: &mut TvdbClient, series_id: &str, cache: &mut Cache) -> Result<()> {
     // Get series name if not cached
     if cache.get_series_name(series_id).is_none() {
         let series_name = client.get_series_name(series_id)?;
@@ -177,18 +165,11 @@ fn preload_cache(
     Ok(())
 }
 
-fn search_and_select_show(
-    api_key: &str,
-    query: &str,
-    _cache: &mut Cache,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let mut client = TvdbClient::new(api_key.to_string());
-    client.login()?;
-
+fn search_and_select_show(client: &mut TvdbClient, query: &str) -> Result<String> {
     let results = client.search_series(query)?;
 
     if results.is_empty() {
-        return Err(format!("No shows found matching '{}'", query).into());
+        bail!("No shows found matching '{}'", query);
     }
 
     if results.len() == 1 {
@@ -213,10 +194,13 @@ fn search_and_select_show(
 
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
-    let choice: usize = input.trim().parse().map_err(|_| "Invalid selection")?;
+    let choice: usize = input
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid selection"))?;
 
     if choice < 1 || choice > results.len() {
-        return Err("Invalid selection".into());
+        bail!("Invalid selection");
     }
 
     Ok(results[choice - 1].tvdb_id.clone())
@@ -224,77 +208,50 @@ fn search_and_select_show(
 
 fn process_file(
     file_path: &Path,
-    api_key: &str,
     show_id: &str,
+    show_name: &str,
     skip_confirm: bool,
+    client: &mut TvdbClient,
     cache: &mut Cache,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     if file_path.extension().and_then(|s| s.to_str()) != Some("mkv") {
-        eprintln!("Skipping non-MKV file: {:?}", file_path);
-        return Ok(());
+        bail!("Skipping non-MKV file: {:?}", file_path);
     }
 
     println!("Processing: {:?}", file_path);
 
     // Extract production code
-    let production_code = match ocr::extract_production_code(file_path.to_str().unwrap()) {
-        Ok(Some(code)) => code,
-        Ok(None) => {
-            eprintln!(
-                "Warning: Could not extract production code from {:?}",
-                file_path
-            );
-            return Ok(());
-        }
-        Err(e) => {
-            eprintln!("Error extracting production code: {}", e);
-            return Ok(());
-        }
+    let production_code_candidates =
+        ocr::extract_production_code_candidates(file_path.to_str().unwrap())?;
+    if production_code_candidates.is_empty() {
+        eprintln!(
+            "Warning: No production code candidates found for {:?}",
+            file_path
+        );
+        return Ok(());
+    }
+
+    let Some(episode) = production_code_candidates.into_iter().find_map(|code| {
+        client
+            .find_episode_by_production_code(show_id, &code, cache)
+            .ok()
+            .flatten()
+    }) else {
+        eprintln!(
+            "Warning: No production code found in cache for {:?}",
+            file_path
+        );
+        return Ok(());
     };
 
-    println!("Found production code: {}", production_code);
-
-    // Lookup episode in cache first
-    let episode = if let Some(ep_cache) = cache.get_episode(&production_code) {
-        // Use cached episode data
-        tvdb::Episode {
-            absolute_number: None,
-            season_number: ep_cache.season_number,
-            episode_number: ep_cache.episode_number,
-            id: 0,
-            name: ep_cache.name.clone(),
-        }
-    } else {
-        // Fallback to API lookup if not in cache
-        let mut client = TvdbClient::new(api_key.to_string());
-        client.login()?;
-
-        match client.find_episode_by_production_code(show_id, &production_code, cache)? {
-            Some(ep) => ep,
-            None => {
-                eprintln!(
-                    "Warning: Episode not found in TVDB for production code: {}",
-                    production_code
-                );
-                return Ok(());
-            }
-        }
-    };
-
-    // Get show name from cache or API
-    let show_name = if let Some(name) = cache.get_series_name(show_id) {
-        name.clone()
-    } else {
-        let mut client = TvdbClient::new(api_key.to_string());
-        client.login()?;
-        let name = client.get_series_name(show_id)?;
-        cache.set_series_name(show_id.to_string(), name.clone());
-        name
-    };
+    println!(
+        "Found episode: S{}E{} - {}",
+        episode.season_number, episode.episode_number, episode.name
+    );
 
     // Generate new filename
     let new_filename = rename::generate_filename(
-        &show_name,
+        show_name,
         episode.season_number,
         episode.episode_number,
         &episode.name,
@@ -312,11 +269,33 @@ fn process_file(
 
 fn process_directory(
     dir_path: &Path,
-    api_key: &str,
     show_id: &str,
+    show_name: &str,
     skip_confirm: bool,
+    recursive: bool,
+    client: &mut TvdbClient,
     cache: &mut Cache,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
+    let mkv_files = if recursive {
+        collect_mkv_files_recursive(dir_path)?
+    } else {
+        collect_mkv_files(dir_path)?
+    };
+
+    println!("Found {} MKV file(s) to process", mkv_files.len());
+
+    for file_path in mkv_files {
+        if let Err(e) = process_file(&file_path, show_id, show_name, skip_confirm, client, cache) {
+            eprintln!("Error processing {:?}: {}", file_path, e);
+            // Continue processing other files
+        }
+        println!(); // Blank line between files
+    }
+
+    Ok(())
+}
+
+fn collect_mkv_files(dir_path: &Path) -> Result<Vec<PathBuf>> {
     let entries = fs::read_dir(dir_path)?;
     let mut mkv_files: Vec<PathBuf> = entries
         .filter_map(|entry| {
@@ -331,16 +310,41 @@ fn process_directory(
         .collect();
 
     mkv_files.sort();
+    Ok(mkv_files)
+}
 
-    println!("Found {} MKV file(s) to process", mkv_files.len());
+fn collect_mkv_files_recursive(dir_path: &Path) -> Result<Vec<PathBuf>> {
+    let mut mkv_files = Vec::new();
+    collect_mkv_files_recursive_helper(dir_path, &mut mkv_files)?;
+    mkv_files.sort();
+    Ok(mkv_files)
+}
 
-    for file_path in mkv_files {
-        if let Err(e) = process_file(&file_path, api_key, show_id, skip_confirm, cache) {
-            eprintln!("Error processing {:?}: {}", file_path, e);
-            // Continue processing other files
+fn collect_mkv_files_recursive_helper(dir_path: &Path, mkv_files: &mut Vec<PathBuf>) -> Result<()> {
+    let entries = fs::read_dir(dir_path)?;
+
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.is_file() {
+            if path.extension().and_then(|s| s.to_str()) == Some("mkv") {
+                mkv_files.push(path);
+            }
+        } else if path.is_dir() {
+            // Recursively scan subdirectories
+            collect_mkv_files_recursive_helper(&path, mkv_files)?;
         }
-        println!(); // Blank line between files
     }
 
     Ok(())
+}
+
+fn get_show_name(client: &mut TvdbClient, show_id: &str, cache: &mut Cache) -> Result<String> {
+    if let Some(name) = cache.get_series_name(show_id) {
+        return Ok(name.clone());
+    }
+    let name = client.get_series_name(show_id)?;
+    cache.set_series_name(show_id.to_string(), name.clone());
+    Ok(name)
 }

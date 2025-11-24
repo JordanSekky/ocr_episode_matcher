@@ -281,6 +281,7 @@ dependencies = [
 name = "episode-matcher"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "clap",
  "image",
  "ocrs",

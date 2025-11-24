@@ -2,6 +2,8 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use anyhow::Result;
+
 pub fn generate_filename(
     show_name: &str,
     season: u32,
@@ -65,11 +67,7 @@ pub fn confirm_rename(old_path: &Path, new_path: &Path) -> bool {
     input.trim().to_lowercase() == "y" || input.trim().to_lowercase() == "yes"
 }
 
-pub fn rename_file(
-    old_path: &Path,
-    new_path: &Path,
-    skip_confirm: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn rename_file(old_path: &Path, new_path: &Path, skip_confirm: bool) -> Result<()> {
     if old_path.to_string_lossy() == new_path.to_string_lossy() {
         println!("File is already named correctly.");
         return Ok(());

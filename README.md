@@ -61,17 +61,23 @@ tvdb_api_key = "your-api-key-here"
 
 Process a single file:
 ```bash
-episode-matcher -i "/path/to/file.mkv" --show-id 77398
+episode-matcher "/path/to/file.mkv" --show-id 77398
 ```
 
 Process a directory:
 ```bash
-episode-matcher -i "/path/to/directory" --show-id 77398
+episode-matcher "/path/to/directory" --show-id 77398
+```
+
+Process multiple files or directories:
+```bash
+episode-matcher "/path/to/dir1" "/path/to/dir2" "/path/to/file.mkv" --show-id 77398
 ```
 
 ### Command Line Options
 
-- `-i, --input <path>` - Input file or directory (required)
+- `<inputs>...` - Input files or directories to process (required, one or more)
+- `-r, --recursive` - Recursively scan directories for MKV files
 - `--show <name>` - Show name to search in TheTVDB (will prompt for selection if multiple matches)
 - `--show-id <id>` - Direct TheTVDB show ID (faster, no search needed)
 - `--no-confirm` - Skip confirmation prompts (useful for batch processing)
@@ -80,16 +86,23 @@ episode-matcher -i "/path/to/directory" --show-id 77398
 
 **Using show name:**
 ```bash
-episode-matcher -i "/path/to/videos" --show "The X-Files"
+episode-matcher "/path/to/videos" --show "The X-Files"
 ```
 
 **Using show ID (faster):**
 ```bash
-episode-matcher -i "/path/to/videos" --show-id 77398 --no-confirm
+episode-matcher "/path/to/videos" --show-id 77398 --no-confirm
 ```
 
 **Process multiple directories:**
-After processing the initial input, the program will prompt you to enter additional paths. Press Enter to exit.
+```bash
+episode-matcher "/path/to/season1" "/path/to/season2" "/path/to/season3" --show-id 77398 --no-confirm
+```
+
+**Recursively scan a directory:**
+```bash
+episode-matcher -r "/path/to/videos" --show-id 77398
+```
 
 ## How It Works
 

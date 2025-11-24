@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 
+use anyhow::{bail, Result};
+
 const TVDB_API_BASE: &str = "https://api4.thetvdb.com/v4";
 
 #[derive(Debug, Clone)]
@@ -90,7 +92,7 @@ impl TvdbClient {
         }
     }
 
-    pub fn login(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn login(&mut self) -> Result<()> {
         let client = reqwest::blocking::Client::new();
         let body = serde_json::json!({
             "apikey": self.api_key
@@ -102,7 +104,7 @@ impl TvdbClient {
             .send()?;
 
         if !response.status().is_success() {
-            return Err(format!("TVDB login failed: HTTP {}", response.status()).into());
+            bail!("TVDB login failed: HTTP {}", response.status());
         }
 
         let login_resp: LoginResponse = serde_json::from_str(&response.text()?)?;
@@ -110,17 +112,14 @@ impl TvdbClient {
         Ok(())
     }
 
-    fn ensure_authenticated(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    fn ensure_authenticated(&mut self) -> Result<()> {
         if self.token.is_none() {
             self.login()?;
         }
         Ok(())
     }
 
-    pub fn search_series(
-        &mut self,
-        query: &str,
-    ) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
+    pub fn search_series(&mut self, query: &str) -> Result<Vec<SearchResult>> {
         self.ensure_authenticated()?;
 
         let client = reqwest::blocking::Client::new();
@@ -134,17 +133,14 @@ impl TvdbClient {
             .send()?;
 
         if !response.status().is_success() {
-            return Err(format!("TVDB search failed: HTTP {}", response.status()).into());
+            bail!("TVDB search failed: HTTP {}", response.status());
         }
 
         let search_resp: SearchResponse = serde_json::from_str(&response.text()?)?;
         Ok(search_resp.data)
     }
 
-    pub fn get_series_name(
-        &mut self,
-        series_id: &str,
-    ) -> Result<String, Box<dyn std::error::Error>> {
+    pub fn get_series_name(&mut self, series_id: &str) -> Result<String> {
         self.ensure_authenticated()?;
 
         let client = reqwest::blocking::Client::new();
@@ -157,19 +153,19 @@ impl TvdbClient {
             .send()?;
 
         if !response.status().is_success() {
-            return Err(format!("TVDB series lookup failed: HTTP {}", response.status()).into());
+            bail!("TVDB series lookup failed: HTTP {}", response.status());
         }
 
         let series_resp: SeriesResponse = serde_json::from_str(&response.text()?)?;
 
-        return Ok(series_resp.data.name);
+        Ok(series_resp.data.name)
     }
 
     pub fn preload_episodes(
         &mut self,
         series_id: &str,
         cache: &mut crate::cache::Cache,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<()> {
         self.ensure_authenticated()?;
 
         // Get all episodes for the series
@@ -195,7 +191,7 @@ impl TvdbClient {
                 if status == 404 {
                     break;
                 }
-                return Err(format!("TVDB episodes lookup failed: HTTP {}", status).into());
+                bail!("TVDB episodes lookup failed: HTTP {}", status);
             }
 
             let episodes_resp: EpisodesResponse = serde_json::from_str(&response_text)?;
@@ -250,7 +246,7 @@ impl TvdbClient {
         series_id: &str,
         production_code: &str,
         cache: &mut crate::cache::Cache,
-    ) -> Result<Option<Episode>, Box<dyn std::error::Error>> {
+    ) -> Result<Option<Episode>> {
         // Check cache first (get_episode handles case-insensitive lookup)
         if let Some(ep_cache) = cache.get_episode(production_code) {
             // Return episode from cache
@@ -289,7 +285,7 @@ impl TvdbClient {
                 if status == 404 {
                     break;
                 }
-                return Err(format!("TVDB episodes lookup failed: HTTP {}", status).into());
+                bail!("TVDB episodes lookup failed: HTTP {}", status.to_string());
             }
 
             let episodes_resp: EpisodesResponse = serde_json::from_str(&response_text)?;

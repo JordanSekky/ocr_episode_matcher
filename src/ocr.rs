@@ -1,3 +1,6 @@
+use anyhow::anyhow;
+use anyhow::bail;
+use anyhow::Result;
 use ocrs::{ImageSource, OcrEngine, OcrEngineParams};
 use regex::Regex;
 use rten::Model;
@@ -8,16 +11,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 
-pub fn extract_production_code(
-    mkv_path: &str,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
+pub fn extract_production_code_candidates(mkv_path: &str) -> Result<Vec<String>> {
     // Create temporary directory for frames
     let temp_dir = TempDir::new()?;
     let temp_path = temp_dir.path();
 
     // Extract frames from last 15 seconds at 1 fps
     let output_pattern = temp_path.join("frame_%04d.png");
-    let output_pattern_str = output_pattern.to_str().ok_or("Invalid temp path")?;
+    let Some(output_pattern_str) = output_pattern.to_str() else {
+        bail!("Invalid temp path");
+    };
 
     let ffmpeg_output = Command::new("ffmpeg")
         .arg("-sseof")
@@ -33,18 +36,16 @@ pub fn extract_production_code(
     let ffmpeg_output = match ffmpeg_output {
         Ok(output) => output,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(
-                "FFmpeg not found. Please install ffmpeg and ensure it's in your PATH.".into(),
-            );
+            bail!("FFmpeg not found. Please install ffmpeg and ensure it's in your PATH.");
         }
         Err(e) => {
-            return Err(format!("Failed to execute ffmpeg: {}", e).into());
+            bail!("Failed to execute ffmpeg: {}", e);
         }
     };
 
     if !ffmpeg_output.status.success() {
         let stderr = String::from_utf8_lossy(&ffmpeg_output.stderr);
-        return Err(format!("FFmpeg error: {}", stderr).into());
+        bail!("FFmpeg error: {}", stderr);
     }
 
     // Initialize OCR engine with models
@@ -53,9 +54,10 @@ pub fn extract_production_code(
     // Regex pattern for production code format:
     // - Seasons 1-5: #3X22 or #1X79 (season X episode)
     // - Season 6-9: #6ABX08 (season 6, episode 6) - format: #<season>ABX<episode>
-    // - Season 10-11: #1AYW01, #2AYW01 - format: #<season>AYWX<episode>
-    // Allow optional spaces around X, case-insensitive
-    let re = Regex::new(r"(?i)#(\d+)([A-Z]*)\s*X\s*(\d+)")?;
+    // - Season 10-11: #1AYW01, #2AYW01 - format: #<season>AYW<episode> (no X)
+    // Case-insensitive, whitespace is stripped before matching
+    // Matches: #<season>X<episode> or #<season><letters>X<episode> or #<season><letters><episode>
+    let re = Regex::new(r"(?i)\d[A-Z]+\d{2,3}")?;
 
     // Process extracted frames
     let mut frame_files: Vec<PathBuf> = fs::read_dir(temp_path)?
@@ -73,6 +75,7 @@ pub fn extract_production_code(
     // Sort frames by name to process in order
     frame_files.sort();
 
+    let mut candidates = Vec::new();
     // Try OCR on each frame until we find the production code
     for frame_path in frame_files {
         // Load image from file
@@ -118,34 +121,14 @@ pub fn extract_production_code(
         // Perform OCR using convenience method that extracts all text
         match ocr_engine.get_text(&ocr_input) {
             Ok(text) => {
+                // Strip all whitespace from the text before matching
+                let text_no_whitespace: String =
+                    text.chars().filter(|c| !c.is_whitespace()).collect();
+
                 // Search for production code pattern in the extracted text
-                if let Some(captures) = re.captures(&text) {
-                    let season = captures.get(1).unwrap().as_str();
-                    let letters = captures.get(2).unwrap().as_str();
-                    let episode = captures.get(3).unwrap().as_str();
-
-                    // Remove leading zeros from episode number only if there are 3+ digits
-                    let episode_normalized = if episode.len() >= 3 {
-                        let ep = episode.trim_start_matches('0');
-                        if ep.is_empty() {
-                            "0"
-                        } else {
-                            ep
-                        }
-                    } else {
-                        episode
-                    };
-
-                    // Reconstruct production code: season + letters + X + episode
-                    // Normalize letters to lowercase to match cache format (cache stores: 6abx08, 1ayw01, etc.)
-                    let letters_lower = letters.to_lowercase();
-                    let normalized = if letters_lower.is_empty() {
-                        format!("{}x{}", season, episode_normalized)
-                    } else {
-                        format!("{}{}x{}", season, letters_lower, episode_normalized)
-                    };
-
-                    return Ok(Some(normalized));
+                let matches = re.find_iter(&text_no_whitespace);
+                for candidate in matches {
+                    candidates.push(candidate.as_str().to_owned());
                 }
             }
             Err(e) => {
@@ -156,10 +139,10 @@ pub fn extract_production_code(
         }
     }
 
-    Ok(None)
+    Ok(candidates)
 }
 
-fn create_ocr_engine() -> Result<OcrEngine, Box<dyn std::error::Error>> {
+fn create_ocr_engine() -> Result<OcrEngine> {
     const DETECTION_MODEL_URL: &str =
         "https://ocrs-models.s3-accelerate.amazonaws.com/text-detection.rten";
     const RECOGNITION_MODEL_URL: &str =
@@ -211,16 +194,18 @@ fn create_ocr_engine() -> Result<OcrEngine, Box<dyn std::error::Error>> {
 
     // Load models
     let detection_model = Model::load_file(&detection_model_path).map_err(|e| {
-        format!(
+        anyhow!(
             "Failed to load detection model from {:?}: {}",
-            detection_model_path, e
+            detection_model_path,
+            e
         )
     })?;
 
     let recognition_model = Model::load_file(&recognition_model_path).map_err(|e| {
-        format!(
+        anyhow!(
             "Failed to load recognition model from {:?}: {}",
-            recognition_model_path, e
+            recognition_model_path,
+            e
         )
     })?;
 
@@ -231,10 +216,10 @@ fn create_ocr_engine() -> Result<OcrEngine, Box<dyn std::error::Error>> {
     })?)
 }
 
-fn download_file(url: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn download_file(url: &str, path: &Path) -> Result<()> {
     let response = reqwest::blocking::get(url)?;
     if !response.status().is_success() {
-        return Err(format!("Failed to download {}: HTTP {}", url, response.status()).into());
+        bail!("Failed to download {}: HTTP {}", url, response.status());
     }
 
     let mut file = fs::File::create(path)?;
