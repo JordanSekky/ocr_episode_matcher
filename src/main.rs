@@ -288,11 +288,7 @@ fn process_directory(
     cache: &mut Cache,
     prompt_size: Option<u64>,
 ) -> Result<()> {
-    let mkv_files = if recursive {
-        collect_mkv_files_recursive(dir_path)?
-    } else {
-        collect_mkv_files(dir_path)?
-    };
+    let mkv_files = collect_mkv_files(dir_path, recursive)?;
 
     println!("Found {} MKV file(s) to process", mkv_files.len());
 
@@ -314,32 +310,18 @@ fn process_directory(
     Ok(())
 }
 
-fn collect_mkv_files(dir_path: &Path) -> Result<Vec<PathBuf>> {
-    let entries = fs::read_dir(dir_path)?;
-    let mut mkv_files: Vec<PathBuf> = entries
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            let path = entry.path();
-            if path.is_file() && path.extension()?.to_str()? == "mkv" {
-                Some(path)
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    mkv_files.sort();
-    Ok(mkv_files)
-}
-
-fn collect_mkv_files_recursive(dir_path: &Path) -> Result<Vec<PathBuf>> {
+fn collect_mkv_files(dir_path: &Path, recurse: bool) -> Result<Vec<PathBuf>> {
     let mut mkv_files = Vec::new();
-    collect_mkv_files_recursive_helper(dir_path, &mut mkv_files)?;
+    collect_mkv_files_helper(dir_path, recurse, &mut mkv_files)?;
     mkv_files.sort();
     Ok(mkv_files)
 }
 
-fn collect_mkv_files_recursive_helper(dir_path: &Path, mkv_files: &mut Vec<PathBuf>) -> Result<()> {
+fn collect_mkv_files_helper(
+    dir_path: &Path,
+    recurse: bool,
+    mkv_files: &mut Vec<PathBuf>,
+) -> Result<()> {
     let entries = fs::read_dir(dir_path)?;
 
     for entry in entries {
@@ -350,9 +332,9 @@ fn collect_mkv_files_recursive_helper(dir_path: &Path, mkv_files: &mut Vec<PathB
             if path.extension().and_then(|s| s.to_str()) == Some("mkv") {
                 mkv_files.push(path);
             }
-        } else if path.is_dir() {
+        } else if path.is_dir() && recurse {
             // Recursively scan subdirectories
-            collect_mkv_files_recursive_helper(&path, mkv_files)?;
+            collect_mkv_files_helper(&path, recurse, mkv_files)?;
         }
     }
 
