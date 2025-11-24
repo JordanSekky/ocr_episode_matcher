@@ -21,7 +21,6 @@ This software is currently **work in progress** and has only been tested and con
 
 - **Rust** (latest stable version)
 - **FFmpeg** (must be installed and available in PATH)
-- **Tesseract OCR** (must be installed with English language data)
 - **TheTVDB API Key** (get one at [thetvdb.com](https://thetvdb.com))
 
 ## Installation
