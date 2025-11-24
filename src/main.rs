@@ -35,6 +35,10 @@ struct Cli {
     /// Recursively scan directories for MKV files
     #[arg(short = 'r', long = "recursive")]
     recursive: bool,
+    /// File size where the user is prompted for the production code
+
+    #[arg(long = "prompt-size")]
+    prompt_size: Option<u64>,
 }
 
 fn main() {
@@ -73,14 +77,7 @@ fn run(cli: Cli) -> Result<()> {
 
     // Preload cache with series name and all episodes (only if not already cached)
     if !cache.has_series_episodes(&show_id) {
-        if let Err(e) = preload_cache(&mut client, &show_id, &mut cache) {
-            eprintln!("Warning: Failed to preload cache: {}", e);
-        } else {
-            // Save cache after preloading
-            if let Err(e) = cache.save() {
-                eprintln!("Warning: Failed to save cache after preload: {}", e);
-            }
-        }
+        preload_cache(&mut client, &show_id, &mut cache)?;
     } else {
         println!("Using cached episode data for series {}", show_id);
     }
@@ -106,8 +103,8 @@ fn run(cli: Cli) -> Result<()> {
             &show_name,
             cli.no_confirm,
             cli.recursive,
-            &mut client,
             &mut cache,
+            cli.prompt_size,
         ) {
             eprintln!("Error processing path {:?}: {}", input_path, e);
             // Continue processing other paths
@@ -124,24 +121,31 @@ fn run(cli: Cli) -> Result<()> {
 
 fn process_input_path(
     input_path: &Path,
-    show_id: &str,
+    series_id: &str,
     show_name: &str,
     skip_confirm: bool,
     recursive: bool,
-    client: &mut TvdbClient,
     cache: &mut Cache,
+    prompt_size: Option<u64>,
 ) -> Result<()> {
     if input_path.is_file() {
-        process_file(input_path, show_id, show_name, skip_confirm, client, cache)?;
+        process_file(
+            input_path,
+            series_id,
+            show_name,
+            skip_confirm,
+            cache,
+            prompt_size,
+        )?;
     } else if input_path.is_dir() {
         process_directory(
             input_path,
-            show_id,
+            series_id,
             show_name,
             skip_confirm,
             recursive,
-            client,
             cache,
+            prompt_size,
         )?;
     } else {
         bail!("Input path is neither a file nor a directory");
@@ -208,11 +212,11 @@ fn search_and_select_show(client: &mut TvdbClient, query: &str) -> Result<String
 
 fn process_file(
     file_path: &Path,
-    show_id: &str,
+    series_id: &str,
     show_name: &str,
     skip_confirm: bool,
-    client: &mut TvdbClient,
     cache: &mut Cache,
+    prompt_size: Option<u64>,
 ) -> Result<()> {
     if file_path.extension().and_then(|s| s.to_str()) != Some("mkv") {
         bail!("Skipping non-MKV file: {:?}", file_path);
@@ -223,24 +227,30 @@ fn process_file(
     // Extract production code
     let production_code_candidates =
         ocr::extract_production_code_candidates(file_path.to_str().unwrap())?;
-    if production_code_candidates.is_empty() {
-        eprintln!(
-            "Warning: No production code candidates found for {:?}",
-            file_path
-        );
-        return Ok(());
-    }
 
-    let Some(episode) = production_code_candidates.into_iter().find_map(|code| {
-        client
-            .find_episode_by_production_code(show_id, &code, cache)
-            .ok()
-            .flatten()
-    }) else {
-        eprintln!(
-            "Warning: No production code found in cache for {:?}",
-            file_path
-        );
+    let episode = match (
+        production_code_candidates
+            .into_iter()
+            .find_map(|code| cache.get_episode(series_id, &code)),
+        prompt_size,
+    ) {
+        (Some(episode), _) => Some(episode),
+        (None, Some(prompt_size)) => {
+            if file_path.metadata()?.len() > prompt_size {
+                println!("Please enter the production code manually.");
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                let production_code = input.trim().to_string();
+                cache.get_episode(series_id, &production_code)
+            } else {
+                None
+            }
+        }
+        (None, None) => None,
+    };
+
+    let Some(episode) = episode else {
+        eprintln!("Warning: No production code found for {:?}", file_path);
         return Ok(());
     };
 
@@ -269,12 +279,12 @@ fn process_file(
 
 fn process_directory(
     dir_path: &Path,
-    show_id: &str,
+    series_id: &str,
     show_name: &str,
     skip_confirm: bool,
     recursive: bool,
-    client: &mut TvdbClient,
     cache: &mut Cache,
+    prompt_size: Option<u64>,
 ) -> Result<()> {
     let mkv_files = if recursive {
         collect_mkv_files_recursive(dir_path)?
@@ -285,7 +295,14 @@ fn process_directory(
     println!("Found {} MKV file(s) to process", mkv_files.len());
 
     for file_path in mkv_files {
-        if let Err(e) = process_file(&file_path, show_id, show_name, skip_confirm, client, cache) {
+        if let Err(e) = process_file(
+            &file_path,
+            series_id,
+            show_name,
+            skip_confirm,
+            cache,
+            prompt_size,
+        ) {
             eprintln!("Error processing {:?}: {}", file_path, e);
             // Continue processing other files
         }

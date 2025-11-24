@@ -57,7 +57,7 @@ pub fn extract_production_code_candidates(mkv_path: &str) -> Result<Vec<String>>
     // - Season 10-11: #1AYW01, #2AYW01 - format: #<season>AYW<episode> (no X)
     // Case-insensitive, whitespace is stripped before matching
     // Matches: #<season>X<episode> or #<season><letters>X<episode> or #<season><letters><episode>
-    let re = Regex::new(r"(?i)\d[A-Z]+[\dO]{2,3}")?;
+    let re = Regex::new(r"(?i)\d[A-Z]{1,3}[\d]{2,3}")?;
 
     // Process extracted frames
     let mut frame_files: Vec<PathBuf> = fs::read_dir(temp_path)?
@@ -122,8 +122,17 @@ pub fn extract_production_code_candidates(mkv_path: &str) -> Result<Vec<String>>
         match ocr_engine.get_text(&ocr_input) {
             Ok(text) => {
                 // Strip all whitespace from the text before matching
-                let text_no_whitespace: String =
-                    text.chars().filter(|c| !c.is_whitespace()).collect();
+                let text_no_whitespace: String = text
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .map(|c| match c {
+                        'O' => '0',
+                        'I' => '1',
+                        'S' => '5',
+                        '?' => 'X',
+                        _ => c,
+                    })
+                    .collect();
 
                 // Search for production code pattern in the extracted text
                 let matches = re.find_iter(&text_no_whitespace);
@@ -138,6 +147,7 @@ pub fn extract_production_code_candidates(mkv_path: &str) -> Result<Vec<String>>
             }
         }
     }
+    eprintln!("Found candidates: {:?}", candidates);
 
     Ok(candidates)
 }

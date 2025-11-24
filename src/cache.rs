@@ -7,12 +7,11 @@ use std::path::PathBuf;
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Cache {
     pub series: HashMap<String, String>, // series_id -> series_name
-    pub episodes: HashMap<String, EpisodeCache>, // production_code -> episode_info
+    pub episodes: HashMap<String, HashMap<String, EpisodeCache>>, // series_id -> production_code -> episode_info
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct EpisodeCache {
-    pub series_id: String,
     pub season_number: u32,
     pub episode_number: u32,
     pub name: String,
@@ -52,21 +51,31 @@ impl Cache {
         self.series.insert(series_id, name);
     }
 
-    pub fn get_episode(&self, production_code: &str) -> Option<&EpisodeCache> {
+    pub fn get_episode(&self, series_id: &str, production_code: &str) -> Option<&EpisodeCache> {
         // Lookup is case-insensitive
         let key = production_code.to_lowercase();
-        self.episodes.get(&key)
+        self.episodes
+            .get(series_id)
+            .and_then(|episodes| episodes.get(&key))
     }
 
-    pub fn set_episode(&mut self, production_code: String, episode: EpisodeCache) {
+    pub fn set_episode(
+        &mut self,
+        series_id: String,
+        production_code: String,
+        episode: EpisodeCache,
+    ) {
         // Store in lowercase for case-insensitive lookup
         let key = production_code.to_lowercase();
-        self.episodes.insert(key, episode);
+        self.episodes
+            .entry(series_id)
+            .or_insert_with(HashMap::new)
+            .insert(key, episode);
     }
 
     pub fn has_series_episodes(&self, series_id: &str) -> bool {
         // Check if we have any episodes cached for this series
-        self.episodes.values().any(|ep| ep.series_id == series_id)
+        self.episodes.contains_key(series_id)
     }
 }
 

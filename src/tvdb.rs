@@ -45,15 +45,7 @@ struct EpisodesData {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Episode {
-    #[serde(rename = "absoluteNumber")]
-    pub absolute_number: Option<u32>,
-    #[serde(rename = "seasonNumber")]
-    pub season_number: u32,
-    #[serde(rename = "number")]
-    pub episode_number: u32,
-    #[serde(rename = "id")]
     pub id: u32,
-    pub name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -70,8 +62,6 @@ struct ExtendedEpisodeData {
     #[serde(rename = "number")]
     pub episode_number: u32,
     pub name: String,
-    #[serde(rename = "id")]
-    pub id: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -227,117 +217,16 @@ impl TvdbClient {
                 {
                     if let Some(code) = &extended_resp.data.production_code {
                         let ep_cache = crate::cache::EpisodeCache {
-                            series_id: series_id.to_string(),
                             season_number: extended_resp.data.season_number,
                             episode_number: extended_resp.data.episode_number,
                             name: extended_resp.data.name,
                         };
-                        cache.set_episode(code.clone(), ep_cache);
+                        cache.set_episode(series_id.to_string(), code.clone(), ep_cache);
                     }
                 }
             }
         }
 
         Ok(())
-    }
-
-    pub fn find_episode_by_production_code(
-        &mut self,
-        series_id: &str,
-        production_code: &str,
-        cache: &mut crate::cache::Cache,
-    ) -> Result<Option<Episode>> {
-        // Check cache first (get_episode handles case-insensitive lookup)
-        if let Some(ep_cache) = cache.get_episode(production_code) {
-            // Return episode from cache
-            return Ok(Some(Episode {
-                absolute_number: None,
-                season_number: ep_cache.season_number,
-                episode_number: ep_cache.episode_number,
-                id: 0,
-                name: ep_cache.name.clone(),
-            }));
-        }
-
-        // If not in cache, do API lookup (shouldn't happen if preload worked)
-        self.ensure_authenticated()?;
-
-        // Get all episodes for the series
-        let client = reqwest::blocking::Client::new();
-        let mut page = 0;
-        let mut all_episodes = Vec::new();
-
-        loop {
-            let url = format!("{}/series/{}/episodes/default", TVDB_API_BASE, series_id);
-            let response = client
-                .get(&url)
-                .header(
-                    "Authorization",
-                    format!("Bearer {}", self.token.as_ref().unwrap()),
-                )
-                .query(&[("page", page.to_string())])
-                .send()?;
-
-            let status = response.status();
-            let response_text = response.text()?;
-
-            if !status.is_success() {
-                if status == 404 {
-                    break;
-                }
-                bail!("TVDB episodes lookup failed: HTTP {}", status.to_string());
-            }
-
-            let episodes_resp: EpisodesResponse = serde_json::from_str(&response_text)?;
-            let episodes = episodes_resp.data.episodes;
-
-            if episodes.is_empty() {
-                break;
-            }
-
-            all_episodes.extend(episodes);
-            page += 1;
-        }
-
-        // Search for episode with matching production code by checking extended episode details
-        for episode in &all_episodes {
-            let extended_url = format!("{}/episodes/{}/extended", TVDB_API_BASE, episode.id);
-            let extended_response = client
-                .get(&extended_url)
-                .header(
-                    "Authorization",
-                    format!("Bearer {}", self.token.as_ref().unwrap()),
-                )
-                .send()?;
-
-            if extended_response.status().is_success() {
-                if let Ok(extended_resp) =
-                    serde_json::from_str::<ExtendedEpisodeResponse>(&extended_response.text()?)
-                {
-                    if let Some(code) = &extended_resp.data.production_code {
-                        // Cache this episode (cache handles lowercase conversion)
-                        let ep_cache = crate::cache::EpisodeCache {
-                            series_id: series_id.to_string(),
-                            season_number: extended_resp.data.season_number,
-                            episode_number: extended_resp.data.episode_number,
-                            name: extended_resp.data.name.clone(),
-                        };
-                        cache.set_episode(code.clone(), ep_cache);
-
-                        if code.to_lowercase() == production_code.to_lowercase() {
-                            return Ok(Some(Episode {
-                                absolute_number: episode.absolute_number,
-                                season_number: extended_resp.data.season_number,
-                                episode_number: extended_resp.data.episode_number,
-                                id: extended_resp.data.id,
-                                name: extended_resp.data.name,
-                            }));
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(None)
     }
 }
