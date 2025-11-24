@@ -57,7 +57,7 @@ pub fn extract_production_code_candidates(mkv_path: &str) -> Result<Vec<String>>
     // - Season 10-11: #1AYW01, #2AYW01 - format: #<season>AYW<episode> (no X)
     // Case-insensitive, whitespace is stripped before matching
     // Matches: #<season>X<episode> or #<season><letters>X<episode> or #<season><letters><episode>
-    let re = Regex::new(r"(?i)\d[A-Z]+\d{2,3}")?;
+    let re = Regex::new(r"(?i)\d[A-Z]+[\dO]{2,3}")?;
 
     // Process extracted frames
     let mut frame_files: Vec<PathBuf> = fs::read_dir(temp_path)?
