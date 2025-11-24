@@ -1,15 +1,14 @@
 use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Result;
-use ocrs::{ImageSource, OcrEngine, OcrEngineParams};
 use regex::Regex;
-use rten::Model;
 use std::env;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use tempfile::TempDir;
+use tesseract_rs::TesseractAPI;
 
 pub fn extract_production_code_candidates(mkv_path: &str) -> Result<Vec<String>> {
     // Create temporary directory for frames
@@ -48,8 +47,9 @@ pub fn extract_production_code_candidates(mkv_path: &str) -> Result<Vec<String>>
         bail!("FFmpeg error: {stderr}");
     }
 
-    // Initialize OCR engine with models
-    let ocr_engine = create_ocr_engine()?;
+    // Initialize OCR engine
+    let tessdata_dir = get_tessdata_dir()?;
+    let api = Arc::new(create_ocr_engine(&tessdata_dir)?);
 
     // Regex pattern for production code format:
     // - Seasons 1-5: #3X22 or #1X79 (season X episode)
@@ -87,60 +87,52 @@ pub fn extract_production_code_candidates(mkv_path: &str) -> Result<Vec<String>>
             }
         };
 
-        // Convert to grayscale for OCR
-        let gray_img = img.to_luma8();
-        let (width, height) = gray_img.dimensions();
+        // Convert to RGB8 for tesseract (tesseract expects RGB)
+        let rgb_img = img.to_rgb8();
+        let (width, height) = rgb_img.dimensions();
+        let image_data = rgb_img.into_raw();
 
-        // Get image bytes
-        let image_bytes = gray_img.as_raw();
+        // Clone API for this thread (tesseract-rs API is cloneable)
+        let api_clone = api.clone();
 
-        // Create image source for OCR using from_bytes
-        let image_source = match ImageSource::from_bytes(image_bytes, (width, height)) {
-            Ok(source) => source,
-            Err(e) => {
-                eprintln!(
-                    "Warning: Failed to create image source {frame_path:?}: {e}"
-                );
-                continue;
-            }
-        };
+        // Perform OCR
+        match api_clone.set_image(
+            &image_data,
+            width as i32,
+            height as i32,
+            3,                // bytes per pixel (RGB)
+            3 * width as i32, // bytes per line
+        ) {
+            Ok(_) => {
+                match api_clone.get_utf8_text() {
+                    Ok(text) => {
+                        // Strip all whitespace from the text before matching
+                        let text_no_whitespace: String = text
+                            .chars()
+                            .filter(|c| !c.is_whitespace())
+                            .map(|c| match c {
+                                'O' => '0',
+                                'I' => '1',
+                                'S' => '5',
+                                '?' => 'X',
+                                _ => c,
+                            })
+                            .collect();
 
-        // Prepare OCR input (takes ImageSource by value, not reference)
-        let ocr_input = match ocr_engine.prepare_input(image_source) {
-            Ok(input) => input,
-            Err(e) => {
-                eprintln!(
-                    "Warning: Failed to prepare OCR input {frame_path:?}: {e}"
-                );
-                continue;
-            }
-        };
-
-        // Perform OCR using convenience method that extracts all text
-        match ocr_engine.get_text(&ocr_input) {
-            Ok(text) => {
-                // Strip all whitespace from the text before matching
-                let text_no_whitespace: String = text
-                    .chars()
-                    .filter(|c| !c.is_whitespace())
-                    .map(|c| match c {
-                        'O' => '0',
-                        'I' => '1',
-                        'S' => '5',
-                        '?' => 'X',
-                        _ => c,
-                    })
-                    .collect();
-
-                // Search for production code pattern in the extracted text
-                let matches = re.find_iter(&text_no_whitespace);
-                for candidate in matches {
-                    candidates.push(candidate.as_str().to_owned());
+                        // Search for production code pattern in the extracted text
+                        let matches = re.find_iter(&text_no_whitespace);
+                        for candidate in matches {
+                            candidates.push(candidate.as_str().to_owned());
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to get OCR text from frame {frame_path:?}: {e}");
+                        continue;
+                    }
                 }
             }
             Err(e) => {
-                // Continue to next frame if OCR fails on this one
-                eprintln!("Warning: OCR failed on frame {frame_path:?}: {e}");
+                eprintln!("Warning: Failed to set image for OCR on frame {frame_path:?}: {e}");
                 continue;
             }
         }
@@ -150,83 +142,71 @@ pub fn extract_production_code_candidates(mkv_path: &str) -> Result<Vec<String>>
     Ok(candidates)
 }
 
-fn create_ocr_engine() -> Result<OcrEngine> {
-    const DETECTION_MODEL_URL: &str =
-        "https://ocrs-models.s3-accelerate.amazonaws.com/text-detection.rten";
-    const RECOGNITION_MODEL_URL: &str =
-        "https://ocrs-models.s3-accelerate.amazonaws.com/text-recognition.rten";
+fn create_ocr_engine(tessdata_dir: &Path) -> Result<TesseractAPI> {
+    let api = TesseractAPI::new();
 
-    // Determine model directory - use $HOME/.episode-matcher/
+    // Initialize with tessdata directory and English language
+    let tessdata_str = tessdata_dir
+        .to_str()
+        .ok_or_else(|| anyhow!("Invalid tessdata directory path"))?;
+    api.init(tessdata_str, "eng")?;
+
+    Ok(api)
+}
+
+fn get_tessdata_dir() -> Result<PathBuf> {
+    // Check environment variable first
+    if let Ok(tessdata) = env::var("TESSDATA_PREFIX") {
+        let path = PathBuf::from(tessdata);
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+
+    // Check common system locations
+    let common_paths = vec![
+        PathBuf::from("/usr/share/tesseract-ocr/5/tessdata"),
+        PathBuf::from("/usr/share/tesseract-ocr/4/tessdata"),
+        PathBuf::from("/usr/share/tesseract-ocr/tessdata"),
+        PathBuf::from("/usr/local/share/tesseract-ocr/tessdata"),
+        PathBuf::from("/opt/homebrew/share/tesseract-ocr/5/tessdata"),
+        PathBuf::from("/opt/homebrew/share/tesseract-ocr/4/tessdata"),
+        PathBuf::from("/opt/homebrew/share/tessdata"),
+    ];
+
+    for path in common_paths {
+        if path.exists() && path.join("eng.traineddata").exists() {
+            return Ok(path);
+        }
+    }
+
+    // Fallback: use local directory
     let model_dir = env::var("HOME")
         .map(|home| PathBuf::from(home).join(".episode-matcher"))
         .unwrap_or_else(|_| PathBuf::from(".episode-matcher"));
 
-    // Create model directory if it doesn't exist
-    if !model_dir.exists() {
-        fs::create_dir_all(&model_dir)?;
+    let tessdata_dir = model_dir.join("tessdata");
+
+    // Create directory if it doesn't exist
+    if !tessdata_dir.exists() {
+        fs::create_dir_all(&tessdata_dir)?;
     }
 
-    let detection_model_path = model_dir.join("text-detection.rten");
-    let recognition_model_path = model_dir.join("text-recognition.rten");
-
-    // Check environment variables first
-    let detection_model_path = env::var("OCRS_DETECTION_MODEL")
-        .ok()
-        .map(PathBuf::from)
-        .filter(|p| p.exists())
-        .unwrap_or(detection_model_path);
-
-    let recognition_model_path = env::var("OCRS_RECOGNITION_MODEL")
-        .ok()
-        .map(PathBuf::from)
-        .filter(|p| p.exists())
-        .unwrap_or(recognition_model_path);
-
-    // Download detection model if it doesn't exist
-    if !detection_model_path.exists() {
+    // Check if eng.traineddata exists, if not, provide instructions
+    let eng_data = tessdata_dir.join("eng.traineddata");
+    if !eng_data.exists() {
         eprintln!(
-            "Downloading detection model to {detection_model_path:?}..."
+            "Warning: Tesseract data files not found. Please install tesseract-ocr and eng language data."
         );
-        download_file(DETECTION_MODEL_URL, &detection_model_path)?;
-    }
-
-    // Download recognition model if it doesn't exist
-    if !recognition_model_path.exists() {
+        eprintln!("On macOS: brew install tesseract tesseract-lang");
+        eprintln!("On Ubuntu/Debian: sudo apt-get install tesseract-ocr tesseract-ocr-eng");
         eprintln!(
-            "Downloading recognition model to {recognition_model_path:?}..."
+            "Or download eng.traineddata from https://github.com/tesseract-ocr/tessdata and place it in: {tessdata_dir:?}"
         );
-        download_file(RECOGNITION_MODEL_URL, &recognition_model_path)?;
+        bail!(
+            "Tesseract data files not found. Please install tesseract-ocr with English language support."
+        );
     }
 
-    // Load models
-    let detection_model = Model::load_file(&detection_model_path).map_err(|e| {
-        anyhow!(
-            "Failed to load detection model from {detection_model_path:?}: {e}"
-        )
-    })?;
-
-    let recognition_model = Model::load_file(&recognition_model_path).map_err(|e| {
-        anyhow!(
-            "Failed to load recognition model from {recognition_model_path:?}: {e}"
-        )
-    })?;
-
-    OcrEngine::new(OcrEngineParams {
-        detection_model: Some(detection_model),
-        recognition_model: Some(recognition_model),
-        ..Default::default()
-    })
-}
-
-fn download_file(url: &str, path: &Path) -> Result<()> {
-    let response = reqwest::blocking::get(url)?;
-    if !response.status().is_success() {
-        bail!("Failed to download {}: HTTP {}", url, response.status());
-    }
-
-    let mut file = fs::File::create(path)?;
-    let content = response.bytes()?;
-    file.write_all(&content)?;
-
-    Ok(())
+    Ok(tessdata_dir)
 }

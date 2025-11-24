@@ -21,6 +21,7 @@ This software is currently **work in progress** and has only been tested and con
 
 - **Rust** (latest stable version)
 - **FFmpeg** (must be installed and available in PATH)
+- **Tesseract OCR** (must be installed with English language data)
 - **TheTVDB API Key** (get one at [thetvdb.com](https://thetvdb.com))
 
 ## Installation
@@ -154,15 +155,25 @@ Make sure FFmpeg is installed and available in your PATH:
 ffmpeg -version
 ```
 
-### OCR models not found
-The tool will automatically download OCR models on first run to `~/.episode-matcher/`. If download fails, you can manually download:
-- `text-detection.rten`
-- `text-recognition.rten`
+### Tesseract not found or tessdata missing
+The tool requires Tesseract OCR to be installed with English language data. Install it using:
 
-And place them in `~/.episode-matcher/` or set environment variables:
+**macOS:**
 ```bash
-export OCRS_DETECTION_MODEL="/path/to/text-detection.rten"
-export OCRS_RECOGNITION_MODEL="/path/to/text-recognition.rten"
+brew install tesseract tesseract-lang
+```
+
+**Ubuntu/Debian:**
+```bash
+sudo apt-get install tesseract-ocr tesseract-ocr-eng
+```
+
+**Other systems:**
+Install tesseract-ocr and the English language data package for your distribution.
+
+You can also set the `TESSDATA_PREFIX` environment variable to point to your tessdata directory:
+```bash
+export TESSDATA_PREFIX="/path/to/tessdata"
 ```
 
 ### Production code not found
@@ -180,6 +191,6 @@ MIT License
 
 ## Acknowledgments
 
-- Uses [ocrs](https://crates.io/crates/ocrs) for OCR functionality
+- Uses [tesseract-rs](https://crates.io/crates/tesseract-rs) for OCR functionality (wraps [Tesseract OCR](https://github.com/tesseract-ocr/tesseract))
 - Integrates with [TheTVDB API v4](https://thetvdb.com/api-information)
 
