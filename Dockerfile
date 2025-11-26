@@ -9,7 +9,6 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     libtesseract-dev \
     libleptonica-dev \
-    cmake \
     clang \
     curl \
     wget \
