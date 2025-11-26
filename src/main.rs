@@ -2,23 +2,15 @@ mod cache;
 mod config;
 mod ocr;
 mod rename;
-mod subtitles;
 mod tvdb;
 
 use anyhow::{bail, Result};
 use cache::Cache;
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use tvdb::TvdbClient;
-
-#[derive(Debug, Clone, Copy, ValueEnum, Default)]
-enum MatchMode {
-    #[default]
-    Standard,
-    Subtitles,
-}
 
 #[derive(Parser)]
 #[command(name = "episode-matcher")]
@@ -47,10 +39,6 @@ struct Cli {
 
     #[arg(long = "prompt-size")]
     prompt_size: Option<u64>,
-
-    /// Matching mode
-    #[arg(long, value_enum, default_value_t = MatchMode::Standard)]
-    match_mode: MatchMode,
 }
 
 fn main() {
@@ -117,7 +105,6 @@ fn run(cli: Cli) -> Result<()> {
             cli.recursive,
             &mut cache,
             cli.prompt_size,
-            cli.match_mode,
         ) {
             eprintln!("Error processing path {input_path:?}: {e}");
             // Continue processing other paths
@@ -140,7 +127,6 @@ fn process_input_path(
     recursive: bool,
     cache: &mut Cache,
     prompt_size: Option<u64>,
-    match_mode: MatchMode,
 ) -> Result<()> {
     if input_path.is_file() {
         process_file(
@@ -150,7 +136,6 @@ fn process_input_path(
             skip_confirm,
             cache,
             prompt_size,
-            match_mode,
         )?;
     } else if input_path.is_dir() {
         process_directory(
@@ -161,7 +146,6 @@ fn process_input_path(
             recursive,
             cache,
             prompt_size,
-            match_mode,
         )?;
     } else {
         bail!("Input path is neither a file nor a directory");
@@ -233,7 +217,6 @@ fn process_file(
     skip_confirm: bool,
     cache: &mut Cache,
     prompt_size: Option<u64>,
-    match_mode: MatchMode,
 ) -> Result<()> {
     if file_path.extension().and_then(|s| s.to_str()) != Some("mkv") {
         bail!("Skipping non-MKV file: {file_path:?}");
@@ -241,67 +224,35 @@ fn process_file(
 
     println!("Processing: {file_path:?}");
 
-    let episode = match match_mode {
-        MatchMode::Standard => {
-            // Extract production code
-            let production_code_candidates =
-                ocr::extract_production_code_candidates(file_path.to_str().unwrap())?;
+    // Extract production code
+    let production_code_candidates =
+        ocr::extract_production_code_candidates(file_path.to_str().unwrap())?;
 
-            match (
-                production_code_candidates
-                    .into_iter()
-                    .find_map(|code| cache.get_episode(series_id, &code)),
-                prompt_size,
-            ) {
-                (Some(episode), _) => Some(episode),
-                (None, Some(prompt_size)) => {
-                    if file_path.metadata()?.len() > prompt_size {
-                        println!("Please enter the production code or SXXEXX manually.");
-                        let mut input = String::new();
-                        io::stdin().read_line(&mut input)?;
-                        let production_code = input.trim().to_string();
-                        cache
-                            .get_episode(series_id, &production_code)
-                            .or(cache.get_episode_by_sxxexx(series_id, &production_code))
-                    } else {
-                        None
-                    }
-                }
-                (None, None) => None,
-            }
-        }
-        MatchMode::Subtitles => {
-            // Subtitle matching flow
-            let tracks = subtitles::get_subtitle_tracks(file_path.to_str().unwrap())?;
-            if let Some(track) = subtitles::select_best_track(&tracks) {
-                println!(
-                    "Displaying subtitles from track {}: {} ({})",
-                    track.index,
-                    track.language.as_deref().unwrap_or("unknown"),
-                    track.codec_name
-                );
-
-                if let Err(e) = subtitles::extract_and_display_subtitles(file_path, track) {
-                    eprintln!("Error displaying subtitles: {e}");
-                }
+    let episode = match (
+        production_code_candidates
+            .into_iter()
+            .find_map(|code| cache.get_episode(series_id, &code)),
+        prompt_size,
+    ) {
+        (Some(episode), _) => Some(episode),
+        (None, Some(prompt_size)) => {
+            if file_path.metadata()?.len() > prompt_size {
+                println!("Please enter the production code or SXXEXX manually.");
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                let production_code = input.trim().to_string();
+                cache
+                    .get_episode(series_id, &production_code)
+                    .or(cache.get_episode_by_sxxexx(series_id, &production_code))
             } else {
-                println!("No suitable subtitle tracks found.");
+                None
             }
-
-            println!("Please enter the episode identifier (e.g. S01E01):");
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            let input = input.trim();
-
-            // Try to find by SxxExx first
-            cache
-                .get_episode_by_sxxexx(series_id, input)
-                .or_else(|| cache.get_episode(series_id, input))
         }
+        (None, None) => None,
     };
 
     let Some(episode) = episode else {
-        eprintln!("Warning: Episode not found/identified for {file_path:?}");
+        eprintln!("Warning: No production code found for {file_path:?}");
         return Ok(());
     };
 
@@ -336,7 +287,6 @@ fn process_directory(
     recursive: bool,
     cache: &mut Cache,
     prompt_size: Option<u64>,
-    match_mode: MatchMode,
 ) -> Result<()> {
     let mkv_files = collect_mkv_files(dir_path, recursive)?;
 
@@ -350,7 +300,6 @@ fn process_directory(
             skip_confirm,
             cache,
             prompt_size,
-            match_mode,
         ) {
             eprintln!("Error processing {file_path:?}: {e}");
             // Continue processing other files
