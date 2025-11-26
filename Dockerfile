@@ -1,4 +1,4 @@
-FROM rust:trixie AS builder
+FROM rust:bullseye AS builder
 
 # Install build dependencies
 # libtesseract-dev and libleptonica-dev are needed for tesseract-rs
