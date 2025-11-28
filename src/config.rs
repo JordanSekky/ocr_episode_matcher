@@ -6,7 +6,7 @@ use std::fs;
 use std::path::PathBuf;
 
 #[derive(Debug, Deserialize)]
-struct Config {
+struct ConfigFile {
     tvdb_api_key: Option<String>,
 }
 
@@ -17,10 +17,10 @@ pub fn get_tvdb_api_key() -> Result<String> {
     }
 
     // Then, check config file
-    let config_path = get_config_path()?;
+    let config_path = get_config_path();
     if config_path.exists() {
         let config_content = fs::read_to_string(&config_path)?;
-        let config: Config = toml::from_str(&config_content)?;
+        let config: ConfigFile = toml::from_str(&config_content)?;
         if let Some(key) = config.tvdb_api_key {
             return Ok(key);
         }
@@ -29,10 +29,18 @@ pub fn get_tvdb_api_key() -> Result<String> {
     bail!("TVDB API key not found. Set TVDB_API_KEY environment variable or create config file at $HOME/.episode-matcher/config.toml with tvdb_api_key = \"your-key\"")
 }
 
-fn get_config_path() -> Result<PathBuf> {
-    let home = env::var("HOME")?;
-    let mut path = PathBuf::from(home);
-    path.push(".episode-matcher");
-    path.push("config.toml");
-    Ok(path)
+pub fn get_cache_path() -> PathBuf {
+    get_config_dir_path().join("cache.json")
+}
+
+fn get_config_dir_path() -> PathBuf {
+    xdir::config()
+        .map(|path| path.join("episode-matcher"))
+        // If the standard path could not be found (e.g.`$HOME` is not set),
+        // default to the current directory.
+        .unwrap_or_default()
+}
+
+fn get_config_path() -> PathBuf {
+    get_config_dir_path().join("config.toml")
 }

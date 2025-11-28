@@ -1,12 +1,11 @@
-use anyhow::bail;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use regex::Regex;
-use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 use tempfile::TempDir;
 use tesseract_rs::TesseractAPI;
+
+use crate::media::ffmpeg;
 
 #[cfg(target_os = "macos")]
 const ENG: &[u8] = include_bytes!(concat!(
@@ -37,31 +36,7 @@ pub fn extract_production_code_candidates(mkv_path: &str) -> Result<Vec<String>>
         bail!("Invalid temp path");
     };
 
-    let ffmpeg_output = Command::new("ffmpeg")
-        .arg("-sseof")
-        .arg("-15")
-        .arg("-i")
-        .arg(mkv_path)
-        .arg("-vf")
-        .arg("fps=1")
-        .arg("-y")
-        .arg(output_pattern_str)
-        .output();
-
-    let ffmpeg_output = match ffmpeg_output {
-        Ok(output) => output,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            bail!("FFmpeg not found. Please install ffmpeg and ensure it's in your PATH.");
-        }
-        Err(e) => {
-            bail!("Failed to execute ffmpeg: {e}");
-        }
-    };
-
-    if !ffmpeg_output.status.success() {
-        let stderr = String::from_utf8_lossy(&ffmpeg_output.stderr);
-        bail!("FFmpeg error: {stderr}");
-    }
+    ffmpeg::extract_frames(mkv_path, output_pattern_str)?;
 
     // Initialize OCR engine
     let api = create_ocr_engine()?;
@@ -156,7 +131,6 @@ pub fn extract_production_code_candidates(mkv_path: &str) -> Result<Vec<String>>
 
 pub fn create_ocr_engine() -> Result<TesseractAPI> {
     let api = TesseractAPI::new();
-    // Initialize with tessdata directory and English language
     api.init_5(ENG, ENG.len() as i32, "eng", 3, &[])?;
 
     Ok(api)

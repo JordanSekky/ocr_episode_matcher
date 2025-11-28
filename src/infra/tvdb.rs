@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 use anyhow::{bail, Result};
 
-use crate::cache::EpisodeEntry;
+use crate::domain::models::EpisodeEntry;
 
 const TVDB_API_BASE: &str = "https://api4.thetvdb.com/v4";
 
@@ -156,7 +156,7 @@ impl TvdbClient {
     pub fn preload_episodes(
         &mut self,
         series_id: &str,
-        cache: &mut crate::cache::Cache,
+        cache: &mut crate::infra::cache::Cache,
     ) -> Result<()> {
         self.ensure_authenticated()?;
 

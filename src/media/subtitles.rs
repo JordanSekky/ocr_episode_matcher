@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use pgs_rs::parse::parse_pgs;
 use pgs_rs::render::{render_display_set, DisplaySetIterator};
 use serde::Deserialize;
@@ -6,6 +6,8 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+
+use crate::media::ffmpeg;
 
 #[derive(Debug, Deserialize)]
 struct FfprobeOutput {
@@ -36,28 +38,8 @@ pub struct SubtitleTrack {
 }
 
 pub fn find_best_subtitle_track(path: &Path) -> Result<SubtitleTrack> {
-    let output = Command::new("ffprobe")
-        .args([
-            "-v",
-            "quiet",
-            "-print_format",
-            "json",
-            "-show_streams",
-            "-select_streams",
-            "s",
-            path.to_str().context("Invalid path")?,
-        ])
-        .output()
-        .context("Failed to run ffprobe")?;
-
-    if !output.status.success() {
-        bail!(
-            "ffprobe failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    let info: FfprobeOutput = serde_json::from_slice(&output.stdout)?;
+    let json_output = ffmpeg::get_streams_json(path)?;
+    let info: FfprobeOutput = serde_json::from_slice(&json_output)?;
 
     let mut best_track: Option<SubtitleTrack> = None;
 
@@ -113,30 +95,7 @@ pub fn extract_subtitles(
     };
 
     let output_path = temp_dir.join(format!("extracted.{}", ext));
-    let output_str = output_path
-        .to_str()
-        .context("Invalid output path for subtitles")?;
-
-    let output = Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-i",
-            path.to_str().context("Invalid input path")?,
-            "-map",
-            &format!("0:{}", track_index),
-            "-c:s",
-            "copy",
-            output_str,
-        ])
-        .output()
-        .context("Failed to run ffmpeg for subtitle extraction")?;
-
-    if !output.status.success() {
-        bail!(
-            "ffmpeg subtitle extraction failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    ffmpeg::extract_subtitle_track(path, track_index, &output_path)?;
 
     Ok(output_path)
 }

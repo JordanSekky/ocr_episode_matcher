@@ -1,58 +1,23 @@
-mod cache;
+mod cli;
 mod config;
-mod ocr;
-mod rename;
-mod subtitles;
-mod tvdb;
+mod domain;
+mod infra;
+mod media;
+mod workflows;
 
 use anyhow::{bail, Result};
-use cache::Cache;
-use clap::{Parser, ValueEnum};
-use rustyline::error::ReadlineError;
-use rustyline::DefaultEditor;
+use clap::Parser;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use tvdb::TvdbClient;
 
-#[derive(Debug, Clone, ValueEnum)]
-enum MatchMode {
-    ProductionCode,
-    Subtitles,
-}
+use cli::Cli;
+use infra::cache::Cache;
+use infra::tvdb::TvdbClient;
+use workflows::matchers::{prod_code::ProductionCodeMatcher, subtitle::SubtitleMatcher, Matcher};
+use workflows::renamer;
 
-#[derive(Parser)]
-#[command(name = "episode-matcher")]
-#[command(about = "Extract production codes from video files and rename them using TVDB data")]
-struct Cli {
-    /// Input files or directories to process
-    #[arg(required = true)]
-    inputs: Vec<PathBuf>,
-
-    /// Show name to search in TVDB
-    #[arg(long)]
-    show: Option<String>,
-
-    /// Direct TVDB show ID
-    #[arg(long)]
-    show_id: Option<String>,
-
-    /// Skip confirmation prompts
-    #[arg(long)]
-    no_confirm: bool,
-
-    /// Recursively scan directories for MKV files
-    #[arg(short = 'r', long = "recursive")]
-    recursive: bool,
-    /// File size where the user is prompted for the production code
-
-    #[arg(long = "prompt-size")]
-    prompt_size: Option<u64>,
-
-    /// Matching mode
-    #[arg(long, default_value = "production-code")]
-    match_mode: MatchMode,
-}
+use crate::cli::MatchMode;
 
 fn main() {
     let cli = Cli::parse();
@@ -242,69 +207,12 @@ fn process_file(
 
     println!("Processing: {file_path:?}");
 
-    let episode = match match_mode {
-        MatchMode::ProductionCode => {
-            // Extract production code
-            let production_code_candidates =
-                ocr::extract_production_code_candidates(file_path.to_str().unwrap())?;
-
-            match (
-                production_code_candidates
-                    .into_iter()
-                    .find_map(|code| cache.get_episode(series_id, &code)),
-                prompt_size,
-            ) {
-                (Some(episode), _) => Some(episode),
-                (None, Some(prompt_size)) => {
-                    if file_path.metadata()?.len() > prompt_size {
-                        println!("Please enter the production code or SXXEXX manually.");
-                        let input = DefaultEditor::new()?.readline(">> ")?;
-                        let input = input.trim().to_string();
-                        cache.get_episode(series_id, &input).or_else(|| {
-                            parse_sxxexx(&input).ok().and_then(|(season, episode)| {
-                                cache.get_episode_by_sxxexx(series_id, season, episode)
-                            })
-                        })
-                    } else {
-                        None
-                    }
-                }
-                (None, None) => None,
-            }
-        }
-        MatchMode::Subtitles => {
-            let track = subtitles::find_best_subtitle_track(file_path)?;
-            println!("Using subtitle track {} ({:?})", track.index, track.codec);
-
-            let temp_dir = tempfile::TempDir::new()?;
-            let subtitle_path = subtitles::extract_subtitles(
-                file_path,
-                track.index,
-                &track.codec,
-                temp_dir.path(),
-            )?;
-            println!("Extracted subtitle to {subtitle_path:?}");
-
-            let ocr_engine = match track.codec {
-                subtitles::SubtitleCodec::Pgs => Some(ocr::create_ocr_engine()?),
-                _ => None,
-            };
-
-            subtitles::process_and_display(&subtitle_path, &track.codec, ocr_engine)?;
-
-            let (season, episode) = get_sxxexx_from_stdin()?;
-            match cache.get_episode_by_sxxexx(series_id, season, episode) {
-                Some(ep) => Some(ep),
-                None => {
-                    eprintln!(
-                        "Failed to find episode matching 'S{}E{}' in cache for series {}",
-                        season, episode, series_id
-                    );
-                    None
-                }
-            }
-        }
+    let matcher: Box<dyn Matcher> = match match_mode {
+        MatchMode::ProductionCode => Box::new(ProductionCodeMatcher { prompt_size }),
+        MatchMode::Subtitles => Box::new(SubtitleMatcher),
     };
+
+    let episode = matcher.match_episode(file_path, series_id, cache)?;
 
     let Some(episode) = episode else {
         eprintln!("Warning: No matching episode found for {file_path:?}");
@@ -317,7 +225,7 @@ fn process_file(
     );
 
     // Generate new filename
-    let new_filename = rename::generate_filename(
+    let new_filename = renamer::generate_filename(
         show_name,
         episode.season_number,
         episode.episode_number,
@@ -326,10 +234,10 @@ fn process_file(
 
     // Find unique filename if needed
     let directory = file_path.parent().unwrap_or(Path::new("."));
-    let new_path = rename::find_unique_filename(file_path, directory, &new_filename);
+    let new_path = renamer::find_unique_filename(file_path, directory, &new_filename);
 
     // Rename file
-    rename::rename_file(file_path, &new_path, skip_confirm)?;
+    renamer::rename_file(file_path, &new_path, skip_confirm)?;
 
     Ok(())
 }
@@ -405,41 +313,4 @@ fn get_show_name(client: &mut TvdbClient, show_id: &str, cache: &mut Cache) -> R
     let name = client.get_series_name(show_id)?;
     cache.set_series_name(show_id.to_string(), name.clone());
     Ok(name)
-}
-
-fn parse_sxxexx(input: &str) -> Result<(u64, u64)> {
-    let re = regex::Regex::new(r"(?i)^s(\d{1,2})e(\d{1,2})$").unwrap();
-    let caps = re
-        .captures(input)
-        .ok_or(anyhow::anyhow!("Invalid SXXEXX format"))?;
-    let season: u64 = caps
-        .get(1)
-        .ok_or(anyhow::anyhow!("Invalid SXXEXX format"))?
-        .as_str()
-        .parse()?;
-    let episode: u64 = caps
-        .get(2)
-        .ok_or(anyhow::anyhow!("Invalid SXXEXX format"))?
-        .as_str()
-        .parse()?;
-    Ok((season, episode))
-}
-
-fn get_sxxexx_from_stdin() -> Result<(u64, u64)> {
-    println!("Please enter SXXEXX (e.g. S01E01):");
-    let mut rl = DefaultEditor::new()?;
-    let readline = rl.readline(">> ");
-    match readline {
-        Ok(line) => {
-            let (season, episode) = parse_sxxexx(&line)?;
-            return Ok((season, episode));
-        }
-        Err(ReadlineError::Interrupted) => {
-            bail!("Interrupted");
-        }
-        Err(ReadlineError::Eof) => {
-            bail!("EOF");
-        }
-        Err(err) => Err(err.into()),
-    }
 }

@@ -21,8 +21,6 @@ FROM debian:trixie-slim
 
 # Install runtime dependencies:
 # - ffmpeg: for frame and subtitle extraction
-# - libtesseract4: shared library for the linked tesseract code
-# - tesseract-ocr-eng: English training data for Tesseract
 # - ca-certificates: for HTTPS requests (TVDB API)
 # - less: as the default pager
 RUN apt-get update && apt-get install -y \

@@ -1,22 +1,15 @@
+use crate::config::get_cache_path;
+use crate::domain::models::EpisodeEntry;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Cache {
     pub series: HashMap<String, String>, // series_id -> series_name
     pub episodes_by_production_code: HashMap<String, HashMap<String, EpisodeEntry>>, // series_id -> production_code -> episode_info
     pub episodes_by_sxxexx: HashMap<String, HashMap<u64, HashMap<u64, EpisodeEntry>>>, // series_id -> season_number -> episode_number -> episode_info
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct EpisodeEntry {
-    pub production_code: Option<String>,
-    pub season_number: u64,
-    pub episode_number: u64,
-    pub name: String,
 }
 
 impl Cache {
@@ -99,14 +92,4 @@ impl Cache {
         self.episodes_by_production_code.contains_key(series_id)
             || self.episodes_by_sxxexx.contains_key(series_id)
     }
-}
-
-fn get_cache_path() -> PathBuf {
-    std::env::var("HOME")
-        .map(|home| {
-            PathBuf::from(home)
-                .join(".episode-matcher")
-                .join("cache.json")
-        })
-        .unwrap_or_else(|_| PathBuf::from(".episode-matcher").join("cache.json"))
 }

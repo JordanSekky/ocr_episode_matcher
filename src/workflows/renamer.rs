@@ -1,3 +1,4 @@
+use rustyline::DefaultEditor;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -61,8 +62,11 @@ pub fn confirm_rename(old_path: &Path, new_path: &Path) -> bool {
     );
     io::stdout().flush().unwrap();
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).unwrap();
+    let mut rl = DefaultEditor::new().unwrap();
+    let input = match rl.readline("") {
+        Ok(line) => line,
+        Err(_) => String::new(),
+    };
 
     input.trim().to_lowercase() == "y" || input.trim().to_lowercase() == "yes"
 }
