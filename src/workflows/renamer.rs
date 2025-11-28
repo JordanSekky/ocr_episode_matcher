@@ -1,7 +1,5 @@
-use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::fs;
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
