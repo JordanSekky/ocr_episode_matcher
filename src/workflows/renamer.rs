@@ -1,3 +1,4 @@
+use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::fs;
 use std::io::{self, Write};
@@ -55,12 +56,11 @@ pub fn find_unique_filename(old_path: &Path, directory: &Path, base_filename: &s
 }
 
 pub fn confirm_rename(old_path: &Path, new_path: &Path) -> bool {
-    print!(
+    println!(
         "Rename \"{}\" -> \"{}\"? [y/N] ",
         old_path.file_name().unwrap().to_string_lossy(),
         new_path.file_name().unwrap().to_string_lossy()
     );
-    io::stdout().flush().unwrap();
 
     let mut rl = DefaultEditor::new().unwrap();
     let input = match rl.readline("") {
