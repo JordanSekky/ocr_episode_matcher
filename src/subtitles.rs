@@ -195,6 +195,8 @@ pub fn process_and_display(
                     }
                 }
             }
+            // Drop stdin to close the pipe and signal EOF to the pager
+            drop(stdin);
         }
     }
 

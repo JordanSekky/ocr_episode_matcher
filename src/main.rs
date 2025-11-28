@@ -292,7 +292,34 @@ fn process_file(
             let mut input = String::new();
             io::stdin().read_line(&mut input)?;
             let input = input.trim();
-            cache.get_episode_by_sxxexx(series_id, input)
+            match cache.get_episode_by_sxxexx(series_id, input) {
+                Some(ep) => Some(ep),
+                None => {
+                    eprintln!(
+                        "Failed to find episode matching '{}' in cache for series {}",
+                        input, series_id
+                    );
+                    // Debug: print available episodes for this series
+                    if let Some(episodes) = cache.episodes.get(series_id) {
+                        eprintln!("Available episodes in cache (season/episode):");
+                        let mut eps: Vec<_> = episodes.values().collect();
+                        eps.sort_by(|a, b| {
+                            a.season_number
+                                .cmp(&b.season_number)
+                                .then(a.episode_number.cmp(&b.episode_number))
+                        });
+                        for ep in eps.iter().take(5) {
+                            eprintln!("  S{:02}E{:02}", ep.season_number, ep.episode_number);
+                        }
+                        if eps.len() > 5 {
+                            eprintln!("  ... and {} more", eps.len() - 5);
+                        }
+                    } else {
+                        eprintln!("No episodes found in cache for this series!");
+                    }
+                    None
+                }
+            }
         }
     };
 

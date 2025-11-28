@@ -222,6 +222,18 @@ impl TvdbClient {
                             name: extended_resp.data.name,
                         };
                         cache.set_episode(series_id.to_string(), code.clone(), ep_cache);
+                    } else {
+                        // Even if there's no production code, we might want to cache it for SXXEXX lookup
+                        // The current cache structure organizes by production code, so this is tricky.
+                        // However, the SXXEXX lookup iterates through ALL values in the inner map.
+                        // So we can just use a dummy key like "SXXEXX_<SEASON>_<EPISODE>"
+                         let ep_cache = crate::cache::EpisodeCache {
+                            season_number: extended_resp.data.season_number,
+                            episode_number: extended_resp.data.episode_number,
+                            name: extended_resp.data.name,
+                        };
+                        let dummy_code = format!("S{:02}E{:02}", extended_resp.data.season_number, extended_resp.data.episode_number);
+                        cache.set_episode(series_id.to_string(), dummy_code, ep_cache);
                     }
                 }
             }
