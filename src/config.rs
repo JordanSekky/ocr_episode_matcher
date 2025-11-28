@@ -30,6 +30,10 @@ pub fn get_tvdb_api_key() -> Result<String> {
 }
 
 pub fn get_cache_path() -> PathBuf {
+    println!(
+        "Using cache path: {}",
+        get_config_dir_path().join("cache.json").display()
+    );
     get_config_dir_path().join("cache.json")
 }
 
