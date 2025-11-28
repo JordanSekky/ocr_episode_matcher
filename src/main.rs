@@ -2,15 +2,22 @@ mod cache;
 mod config;
 mod ocr;
 mod rename;
+mod subtitles;
 mod tvdb;
 
 use anyhow::{bail, Result};
 use cache::Cache;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use tvdb::TvdbClient;
+
+#[derive(Debug, Clone, ValueEnum)]
+enum MatchMode {
+    ProductionCode,
+    Subtitles,
+}
 
 #[derive(Parser)]
 #[command(name = "episode-matcher")]
@@ -39,6 +46,10 @@ struct Cli {
 
     #[arg(long = "prompt-size")]
     prompt_size: Option<u64>,
+
+    /// Matching mode
+    #[arg(long, default_value = "production-code")]
+    match_mode: MatchMode,
 }
 
 fn main() {
@@ -105,6 +116,7 @@ fn run(cli: Cli) -> Result<()> {
             cli.recursive,
             &mut cache,
             cli.prompt_size,
+            &cli.match_mode,
         ) {
             eprintln!("Error processing path {input_path:?}: {e}");
             // Continue processing other paths
@@ -127,6 +139,7 @@ fn process_input_path(
     recursive: bool,
     cache: &mut Cache,
     prompt_size: Option<u64>,
+    match_mode: &MatchMode,
 ) -> Result<()> {
     if input_path.is_file() {
         process_file(
@@ -136,6 +149,7 @@ fn process_input_path(
             skip_confirm,
             cache,
             prompt_size,
+            match_mode,
         )?;
     } else if input_path.is_dir() {
         process_directory(
@@ -146,6 +160,7 @@ fn process_input_path(
             recursive,
             cache,
             prompt_size,
+            match_mode,
         )?;
     } else {
         bail!("Input path is neither a file nor a directory");
@@ -217,6 +232,7 @@ fn process_file(
     skip_confirm: bool,
     cache: &mut Cache,
     prompt_size: Option<u64>,
+    match_mode: &MatchMode,
 ) -> Result<()> {
     if file_path.extension().and_then(|s| s.to_str()) != Some("mkv") {
         bail!("Skipping non-MKV file: {file_path:?}");
@@ -224,35 +240,64 @@ fn process_file(
 
     println!("Processing: {file_path:?}");
 
-    // Extract production code
-    let production_code_candidates =
-        ocr::extract_production_code_candidates(file_path.to_str().unwrap())?;
+    let episode = match match_mode {
+        MatchMode::ProductionCode => {
+            // Extract production code
+            let production_code_candidates =
+                ocr::extract_production_code_candidates(file_path.to_str().unwrap())?;
 
-    let episode = match (
-        production_code_candidates
-            .into_iter()
-            .find_map(|code| cache.get_episode(series_id, &code)),
-        prompt_size,
-    ) {
-        (Some(episode), _) => Some(episode),
-        (None, Some(prompt_size)) => {
-            if file_path.metadata()?.len() > prompt_size {
-                println!("Please enter the production code or SXXEXX manually.");
-                let mut input = String::new();
-                io::stdin().read_line(&mut input)?;
-                let production_code = input.trim().to_string();
-                cache
-                    .get_episode(series_id, &production_code)
-                    .or(cache.get_episode_by_sxxexx(series_id, &production_code))
-            } else {
-                None
+            match (
+                production_code_candidates
+                    .into_iter()
+                    .find_map(|code| cache.get_episode(series_id, &code)),
+                prompt_size,
+            ) {
+                (Some(episode), _) => Some(episode),
+                (None, Some(prompt_size)) => {
+                    if file_path.metadata()?.len() > prompt_size {
+                        println!("Please enter the production code or SXXEXX manually.");
+                        let mut input = String::new();
+                        io::stdin().read_line(&mut input)?;
+                        let production_code = input.trim().to_string();
+                        cache
+                            .get_episode(series_id, &production_code)
+                            .or(cache.get_episode_by_sxxexx(series_id, &production_code))
+                    } else {
+                        None
+                    }
+                }
+                (None, None) => None,
             }
         }
-        (None, None) => None,
+        MatchMode::Subtitles => {
+            let track = subtitles::find_best_subtitle_track(file_path)?;
+            println!("Using subtitle track {} ({:?})", track.index, track.codec);
+
+            let temp_dir = tempfile::TempDir::new()?;
+            let subtitle_path = subtitles::extract_subtitles(
+                file_path,
+                track.index,
+                &track.codec,
+                temp_dir.path(),
+            )?;
+
+            let ocr_engine = match track.codec {
+                subtitles::SubtitleCodec::Pgs => Some(ocr::create_ocr_engine()?),
+                _ => None,
+            };
+
+            subtitles::process_and_display(&subtitle_path, &track.codec, ocr_engine)?;
+
+            println!("Please enter SXXEXX (e.g. S01E01):");
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            let input = input.trim();
+            cache.get_episode_by_sxxexx(series_id, input)
+        }
     };
 
     let Some(episode) = episode else {
-        eprintln!("Warning: No production code found for {file_path:?}");
+        eprintln!("Warning: No matching episode found for {file_path:?}");
         return Ok(());
     };
 
@@ -287,6 +332,7 @@ fn process_directory(
     recursive: bool,
     cache: &mut Cache,
     prompt_size: Option<u64>,
+    match_mode: &MatchMode,
 ) -> Result<()> {
     let mkv_files = collect_mkv_files(dir_path, recursive)?;
 
@@ -300,6 +346,7 @@ fn process_directory(
             skip_confirm,
             cache,
             prompt_size,
+            match_mode,
         ) {
             eprintln!("Error processing {file_path:?}: {e}");
             // Continue processing other files

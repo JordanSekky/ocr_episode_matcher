@@ -154,7 +154,7 @@ pub fn extract_production_code_candidates(mkv_path: &str) -> Result<Vec<String>>
     Ok(candidates)
 }
 
-fn create_ocr_engine() -> Result<TesseractAPI> {
+pub fn create_ocr_engine() -> Result<TesseractAPI> {
     let api = TesseractAPI::new();
     // Initialize with tessdata directory and English language
     api.init_5(ENG, ENG.len() as i32, "eng", 3, &[])?;

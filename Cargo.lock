@@ -442,6 +442,7 @@ dependencies = [
  "anyhow",
  "clap",
  "image",
+ "pgs-rs",
  "regex",
  "reqwest 0.11.27",
  "serde",
@@ -1283,6 +1284,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "pgs-rs"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96834f17811c35a8919ad50b9b6c3a20ebfe6c15cffff0995b39f58c7a892760"
+dependencies = [
+ "struple",
+ "thiserror 2.0.17",
+ "winnow",
+ "yuv",
+]
+
+[[package]]
 name = "pin-project-lite"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1735,6 +1748,26 @@ name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
+
+[[package]]
+name = "struple"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8574c4bc0d1a23fd92df103574812badd294dc3dea6e80b095f60a87a5fa5938"
+dependencies = [
+ "struple-impl",
+]
+
+[[package]]
+name = "struple-impl"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "934863dc48fa9e2b100706446b7f08e56612b0f867987372ef1e2dbc97c92e6e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "subtle"
@@ -2536,6 +2569,15 @@ dependencies = [
  "quote",
  "syn",
  "synstructure",
+]
+
+[[package]]
+name = "yuv"
+version = "0.8.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30078f3e5790a2127f89c57c4ccb46d060205bf2c4c267f77cd08fb5c02c6d79"
+dependencies = [
+ "num-traits",
 ]
 
 [[package]]
