@@ -3,6 +3,8 @@ use std::collections::HashMap;
 
 use anyhow::{bail, Result};
 
+use crate::cache::EpisodeEntry;
+
 const TVDB_API_BASE: &str = "https://api4.thetvdb.com/v4";
 
 #[derive(Debug, Clone)]
@@ -215,26 +217,13 @@ impl TvdbClient {
                 if let Ok(extended_resp) =
                     serde_json::from_str::<ExtendedEpisodeResponse>(&extended_response.text()?)
                 {
-                    if let Some(code) = &extended_resp.data.production_code {
-                        let ep_cache = crate::cache::EpisodeCache {
-                            season_number: extended_resp.data.season_number,
-                            episode_number: extended_resp.data.episode_number,
-                            name: extended_resp.data.name,
-                        };
-                        cache.set_episode(series_id.to_string(), code.clone(), ep_cache);
-                    } else {
-                        // Even if there's no production code, we might want to cache it for SXXEXX lookup
-                        // The current cache structure organizes by production code, so this is tricky.
-                        // However, the SXXEXX lookup iterates through ALL values in the inner map.
-                        // So we can just use a dummy key like "SXXEXX_<SEASON>_<EPISODE>"
-                         let ep_cache = crate::cache::EpisodeCache {
-                            season_number: extended_resp.data.season_number,
-                            episode_number: extended_resp.data.episode_number,
-                            name: extended_resp.data.name,
-                        };
-                        let dummy_code = format!("S{:02}E{:02}", extended_resp.data.season_number, extended_resp.data.episode_number);
-                        cache.set_episode(series_id.to_string(), dummy_code, ep_cache);
-                    }
+                    let entry: EpisodeEntry = EpisodeEntry {
+                        production_code: extended_resp.data.production_code.clone(),
+                        season_number: extended_resp.data.season_number as u64,
+                        episode_number: extended_resp.data.episode_number as u64,
+                        name: extended_resp.data.name,
+                    };
+                    cache.set_episode(series_id, &entry);
                 }
             }
         }

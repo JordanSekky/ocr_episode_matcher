@@ -258,10 +258,9 @@ fn process_file(
                         println!("Please enter the production code or SXXEXX manually.");
                         let mut input = String::new();
                         io::stdin().read_line(&mut input)?;
-                        let production_code = input.trim().to_string();
-                        cache
-                            .get_episode(series_id, &production_code)
-                            .or(cache.get_episode_by_sxxexx(series_id, &production_code))
+                        let input = input.trim().to_string();
+                        let (season, episode) = parse_sxxexx(&input)?;
+                        cache.get_episode_by_sxxexx(series_id, season, episode)
                     } else {
                         None
                     }
@@ -292,31 +291,14 @@ fn process_file(
             let mut input = String::new();
             io::stdin().read_line(&mut input)?;
             let input = input.trim();
-            match cache.get_episode_by_sxxexx(series_id, input) {
+            let (season, episode) = parse_sxxexx(input)?;
+            match cache.get_episode_by_sxxexx(series_id, season, episode) {
                 Some(ep) => Some(ep),
                 None => {
                     eprintln!(
                         "Failed to find episode matching '{}' in cache for series {}",
                         input, series_id
                     );
-                    // Debug: print available episodes for this series
-                    if let Some(episodes) = cache.episodes.get(series_id) {
-                        eprintln!("Available episodes in cache (season/episode):");
-                        let mut eps: Vec<_> = episodes.values().collect();
-                        eps.sort_by(|a, b| {
-                            a.season_number
-                                .cmp(&b.season_number)
-                                .then(a.episode_number.cmp(&b.episode_number))
-                        });
-                        for ep in eps.iter().take(5) {
-                            eprintln!("  S{:02}E{:02}", ep.season_number, ep.episode_number);
-                        }
-                        if eps.len() > 5 {
-                            eprintln!("  ... and {} more", eps.len() - 5);
-                        }
-                    } else {
-                        eprintln!("No episodes found in cache for this series!");
-                    }
                     None
                 }
             }
@@ -422,4 +404,22 @@ fn get_show_name(client: &mut TvdbClient, show_id: &str, cache: &mut Cache) -> R
     let name = client.get_series_name(show_id)?;
     cache.set_series_name(show_id.to_string(), name.clone());
     Ok(name)
+}
+
+fn parse_sxxexx(input: &str) -> Result<(u64, u64)> {
+    let re = regex::Regex::new(r"(?i)^s(\d{1,2})e(\d{1,2})$").unwrap();
+    let caps = re
+        .captures(input)
+        .ok_or(anyhow::anyhow!("Invalid SXXEXX format"))?;
+    let season: u64 = caps
+        .get(1)
+        .ok_or(anyhow::anyhow!("Invalid SXXEXX format"))?
+        .as_str()
+        .parse()?;
+    let episode: u64 = caps
+        .get(2)
+        .ok_or(anyhow::anyhow!("Invalid SXXEXX format"))?
+        .as_str()
+        .parse()?;
+    Ok((season, episode))
 }

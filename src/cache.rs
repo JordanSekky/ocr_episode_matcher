@@ -7,13 +7,15 @@ use std::path::PathBuf;
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Cache {
     pub series: HashMap<String, String>, // series_id -> series_name
-    pub episodes: HashMap<String, HashMap<String, EpisodeCache>>, // series_id -> production_code -> episode_info
+    pub episodes_by_production_code: HashMap<String, HashMap<String, EpisodeEntry>>, // series_id -> production_code -> episode_info
+    pub episodes_by_sxxexx: HashMap<String, HashMap<u64, HashMap<u64, EpisodeEntry>>>, // series_id -> season_number -> episode_number -> episode_info
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct EpisodeCache {
-    pub season_number: u32,
-    pub episode_number: u32,
+pub struct EpisodeEntry {
+    pub production_code: Option<String>,
+    pub season_number: u64,
+    pub episode_number: u64,
     pub name: String,
 }
 
@@ -51,10 +53,10 @@ impl Cache {
         self.series.insert(series_id, name);
     }
 
-    pub fn get_episode(&self, series_id: &str, production_code: &str) -> Option<&EpisodeCache> {
+    pub fn get_episode(&self, series_id: &str, production_code: &str) -> Option<&EpisodeEntry> {
         // Lookup is case-insensitive
         let key = production_code.to_lowercase();
-        self.episodes
+        self.episodes_by_production_code
             .get(series_id)
             .and_then(|episodes| episodes.get(&key))
     }
@@ -62,36 +64,40 @@ impl Cache {
     pub fn get_episode_by_sxxexx(
         &self,
         series_id: &str,
-        identifier: &str,
-    ) -> Option<&EpisodeCache> {
-        // Lookup is case-insensitive, matches S01E01 or s01e01 etc.
-        let re = regex::Regex::new(r"(?i)^s(\d{1,2})e(\d{1,2})$").ok()?;
-        let caps = re.captures(identifier)?;
-        let season: u32 = caps.get(1)?.as_str().parse().ok()?;
-        let episode: u32 = caps.get(2)?.as_str().parse().ok()?;
-        self.episodes
-            .get(series_id)?
-            .values()
-            .find(|ep| ep.season_number == season && ep.episode_number == episode)
+        season_number: u64,
+        episode_number: u64,
+    ) -> Option<&EpisodeEntry> {
+        self.episodes_by_sxxexx.get(series_id).and_then(|seasons| {
+            seasons
+                .get(&season_number)
+                .and_then(|episodes| episodes.get(&episode_number))
+        })
     }
 
-    pub fn set_episode(
-        &mut self,
-        series_id: String,
-        production_code: String,
-        episode: EpisodeCache,
-    ) {
+    pub fn set_episode(&mut self, series_id: &str, episode: &EpisodeEntry) {
         // Store in lowercase for case-insensitive lookup
-        let key = production_code.to_lowercase();
-        self.episodes
-            .entry(series_id)
+        if let Some(key) = episode
+            .clone()
+            .production_code
+            .map(|code| code.to_lowercase())
+        {
+            self.episodes_by_production_code
+                .entry(series_id.to_string())
+                .or_default()
+                .insert(key.clone(), episode.clone());
+        }
+        self.episodes_by_sxxexx
+            .entry(series_id.to_string())
             .or_default()
-            .insert(key, episode);
+            .entry(episode.season_number)
+            .or_default()
+            .insert(episode.episode_number, episode.clone());
     }
 
     pub fn has_series_episodes(&self, series_id: &str) -> bool {
         // Check if we have any episodes cached for this series
-        self.episodes.contains_key(series_id)
+        self.episodes_by_production_code.contains_key(series_id)
+            || self.episodes_by_sxxexx.contains_key(series_id)
     }
 }
 

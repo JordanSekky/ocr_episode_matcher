@@ -6,8 +6,8 @@ use anyhow::Result;
 
 pub fn generate_filename(
     show_name: &str,
-    season: u32,
-    episode: u32,
+    season: u64,
+    episode: u64,
     episode_title: &str,
 ) -> String {
     format!(
