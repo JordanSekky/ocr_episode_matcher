@@ -185,8 +185,24 @@ pub fn process_and_display(
                     let width = ds.width as i32;
                     let height = ds.height as i32;
 
+                    // Convert RGBA to RGB, compositing over a black background
+                    let rgb_data: Vec<u8> = rgba_buffer
+                        .chunks(4)
+                        .flat_map(|chunk| {
+                            // chunk is [r, g, b, a]
+                            // Alpha composition: output = color * alpha + background * (1 - alpha)
+                            // Since background is black (0), output = color * alpha
+                            let r = chunk[0] as f32;
+                            let g = chunk[1] as f32;
+                            let b = chunk[2] as f32;
+                            let a = chunk[3] as f32 / 255.0;
+
+                            [(r * a) as u8, (g * a) as u8, (b * a) as u8]
+                        })
+                        .collect();
+
                     if api
-                        .set_image(&rgba_buffer, width, height, 4, 4 * width)
+                        .set_image(&rgb_data, width, height, 3, 3 * width)
                         .is_ok()
                     {
                         if let Ok(text) = api.get_utf8_text() {
