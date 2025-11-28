@@ -173,6 +173,14 @@ pub fn process_and_display(
                     continue;
                 }
 
+                let _ = writeln!(
+                    stdin,
+                    "{}/{}:{}\n",
+                    ds.composition_number,
+                    pgs.segments.len(),
+                    ds.presentation_timestamp
+                );
+
                 if let Ok(rgba_buffer) = render_display_set(&ds) {
                     let width = ds.width as i32;
                     let height = ds.height as i32;
@@ -185,9 +193,6 @@ pub fn process_and_display(
                             let trimmed = text.trim();
                             if !trimmed.is_empty() {
                                 if writeln!(stdin, "{}", trimmed).is_err() {
-                                    break;
-                                }
-                                if writeln!(stdin).is_err() {
                                     break;
                                 }
                             }
