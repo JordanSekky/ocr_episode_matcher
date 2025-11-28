@@ -51,7 +51,10 @@ pub fn find_best_subtitle_track(path: &Path) -> Result<SubtitleTrack> {
         .context("Failed to run ffprobe")?;
 
     if !output.status.success() {
-        bail!("ffprobe failed");
+        bail!(
+            "ffprobe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     let info: FfprobeOutput = serde_json::from_slice(&output.stdout)?;
@@ -114,7 +117,7 @@ pub fn extract_subtitles(
         .to_str()
         .context("Invalid output path for subtitles")?;
 
-    let status = Command::new("ffmpeg")
+    let output = Command::new("ffmpeg")
         .args([
             "-y",
             "-i",
@@ -125,11 +128,14 @@ pub fn extract_subtitles(
             "copy",
             output_str,
         ])
-        .status()
+        .output()
         .context("Failed to run ffmpeg for subtitle extraction")?;
 
-    if !status.success() {
-        bail!("ffmpeg subtitle extraction failed");
+    if !output.status.success() {
+        bail!(
+            "ffmpeg subtitle extraction failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     Ok(output_path)
@@ -184,12 +190,16 @@ pub fn process_and_display(
                             // chunk is [r, g, b, a]
                             // Alpha composition: output = color * alpha + background * (1 - alpha)
                             // Since background is black (0), output = color * alpha
-                            let r = chunk[0] as f32;
-                            let g = chunk[1] as f32;
-                            let b = chunk[2] as f32;
-                            let a = chunk[3] as f32 / 255.0;
+                            let r = chunk[0] as u16;
+                            let g = chunk[1] as u16;
+                            let b = chunk[2] as u16;
+                            let a = chunk[3] as u16;
 
-                            [(r * a) as u8, (g * a) as u8, (b * a) as u8]
+                            [
+                                ((r * a) / 255) as u8,
+                                ((g * a) / 255) as u8,
+                                ((b * a) / 255) as u8,
+                            ]
                         })
                         .collect();
 

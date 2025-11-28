@@ -8,6 +8,8 @@ mod tvdb;
 use anyhow::{bail, Result};
 use cache::Cache;
 use clap::{Parser, ValueEnum};
+use rustyline::error::ReadlineError;
+use rustyline::DefaultEditor;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -256,11 +258,13 @@ fn process_file(
                 (None, Some(prompt_size)) => {
                     if file_path.metadata()?.len() > prompt_size {
                         println!("Please enter the production code or SXXEXX manually.");
-                        let mut input = String::new();
-                        io::stdin().read_line(&mut input)?;
+                        let input = DefaultEditor::new()?.readline(">> ")?;
                         let input = input.trim().to_string();
-                        let (season, episode) = parse_sxxexx(&input)?;
-                        cache.get_episode_by_sxxexx(series_id, season, episode)
+                        cache.get_episode(series_id, &input).or_else(|| {
+                            parse_sxxexx(&input).ok().and_then(|(season, episode)| {
+                                cache.get_episode_by_sxxexx(series_id, season, episode)
+                            })
+                        })
                     } else {
                         None
                     }
@@ -279,6 +283,7 @@ fn process_file(
                 &track.codec,
                 temp_dir.path(),
             )?;
+            println!("Extracted subtitle to {subtitle_path:?}");
 
             let ocr_engine = match track.codec {
                 subtitles::SubtitleCodec::Pgs => Some(ocr::create_ocr_engine()?),
@@ -287,17 +292,13 @@ fn process_file(
 
             subtitles::process_and_display(&subtitle_path, &track.codec, ocr_engine)?;
 
-            println!("Please enter SXXEXX (e.g. S01E01):");
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            let input = input.trim();
-            let (season, episode) = parse_sxxexx(input)?;
+            let (season, episode) = get_sxxexx_from_stdin()?;
             match cache.get_episode_by_sxxexx(series_id, season, episode) {
                 Some(ep) => Some(ep),
                 None => {
                     eprintln!(
-                        "Failed to find episode matching '{}' in cache for series {}",
-                        input, series_id
+                        "Failed to find episode matching 'S{}E{}' in cache for series {}",
+                        season, episode, series_id
                     );
                     None
                 }
@@ -422,4 +423,23 @@ fn parse_sxxexx(input: &str) -> Result<(u64, u64)> {
         .as_str()
         .parse()?;
     Ok((season, episode))
+}
+
+fn get_sxxexx_from_stdin() -> Result<(u64, u64)> {
+    println!("Please enter SXXEXX (e.g. S01E01):");
+    let mut rl = DefaultEditor::new()?;
+    let readline = rl.readline(">> ");
+    match readline {
+        Ok(line) => {
+            let (season, episode) = parse_sxxexx(&line)?;
+            return Ok((season, episode));
+        }
+        Err(ReadlineError::Interrupted) => {
+            bail!("Interrupted");
+        }
+        Err(ReadlineError::Eof) => {
+            bail!("EOF");
+        }
+        Err(err) => Err(err.into()),
+    }
 }
