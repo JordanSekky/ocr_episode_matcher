@@ -41,8 +41,7 @@ impl Matcher for SubtitleMatcher {
             Some(ep) => Ok(Some(ep.clone())),
             None => {
                 eprintln!(
-                    "Failed to find episode matching 'S{}E{}' in cache for series {}",
-                    season, episode, series_id
+                    "Failed to find episode matching 'S{season}E{episode}' in cache for series {series_id}"
                 );
                 Ok(None)
             }
@@ -57,7 +56,7 @@ fn get_sxxexx_from_stdin() -> Result<(u64, u64)> {
     match readline {
         Ok(line) => {
             let (season, episode) = parse_sxxexx(&line)?;
-            return Ok((season, episode));
+            Ok((season, episode))
         }
         Err(ReadlineError::Interrupted) => {
             bail!("Interrupted");

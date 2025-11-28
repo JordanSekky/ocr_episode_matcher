@@ -42,7 +42,7 @@ pub fn extract_subtitle_track(
             "-i",
             input_path.to_str().context("Invalid input path")?,
             "-map",
-            &format!("0:{}", track_index),
+            &format!("0:{track_index}"),
             "-c:s",
             "copy",
             output_str,

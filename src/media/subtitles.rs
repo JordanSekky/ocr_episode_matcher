@@ -94,7 +94,7 @@ pub fn extract_subtitles(
         SubtitleCodec::Pgs => "sup",
     };
 
-    let output_path = temp_dir.join(format!("extracted.{}", ext));
+    let output_path = temp_dir.join(format!("extracted.{ext}"));
     ffmpeg::extract_subtitle_track(path, track_index, &output_path)?;
 
     Ok(output_path)
@@ -120,7 +120,7 @@ pub fn process_and_display(
             let reader = BufReader::new(file);
             for line in reader.lines() {
                 let line = line?;
-                if writeln!(stdin, "{}", line).is_err() {
+                if writeln!(stdin, "{line}").is_err() {
                     break; // Pager closed
                 }
             }
@@ -128,7 +128,7 @@ pub fn process_and_display(
         SubtitleCodec::Pgs => {
             let mut data = fs::read(subtitle_path)?;
             let pgs = parse_pgs(&mut data)
-                .map_err(|e| anyhow::anyhow!("Failed to parse PGS: {:?}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to parse PGS: {e:?}"))?;
 
             // We need the OCR engine for PGS
             let api = ocr_engine.context("OCR engine required for PGS subtitles")?;
@@ -168,11 +168,10 @@ pub fn process_and_display(
                     {
                         if let Ok(text) = api.get_utf8_text() {
                             let trimmed = text.trim();
-                            if !trimmed.is_empty() {
-                                if writeln!(stdin, "{}\n", trimmed).is_err() {
+                            if !trimmed.is_empty()
+                                && writeln!(stdin, "{trimmed}\n").is_err() {
                                     break;
                                 }
-                            }
                         }
                     }
                 }

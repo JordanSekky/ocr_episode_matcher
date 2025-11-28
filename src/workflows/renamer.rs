@@ -61,10 +61,7 @@ pub fn confirm_rename(old_path: &Path, new_path: &Path) -> bool {
     );
 
     let mut rl = DefaultEditor::new().unwrap();
-    let input = match rl.readline("") {
-        Ok(line) => line,
-        Err(_) => String::new(),
-    };
+    let input = rl.readline("").unwrap_or_default();
 
     input.trim().to_lowercase() == "y" || input.trim().to_lowercase() == "yes"
 }
