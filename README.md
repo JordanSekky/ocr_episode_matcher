@@ -16,6 +16,7 @@ This software is currently **work in progress** and has only been tested and con
 - **Batch Processing**: Process entire directories of MKV files
 - **Caching**: Caches TVDB data locally to avoid repeated API calls
 - **Interactive Mode**: Prompts for confirmation before renaming (can be skipped with `--no-confirm`)
+- **Subtitle Mode**: View embedded subtitles (SRT/PGS) to manually identify episodes
 
 ## Requirements
 
@@ -80,8 +81,10 @@ episode-matcher "/path/to/dir1" "/path/to/dir2" "/path/to/file.mkv" --show-id 77
 - `-r, --recursive` - Recursively scan directories for MKV files
 - `--show <name>` - Show name to search in TheTVDB (will prompt for selection if multiple matches)
 - `--show-id <id>` - Direct TheTVDB show ID (faster, no search needed)
+- `--match-mode <mode>` - Matching strategy: `prod-code` (default) or `subtitles`
 - `--no-confirm` - Skip confirmation prompts (useful for batch processing)
-- `--prompt-size <bytes>` - For files larger than this size, prompt for production code manually if OCR fails
+- `--prompt-size <bytes>` - For files larger than this size, prompt for production code manually if OCR fails (only for `prod-code` mode)
+
 ### Examples
 
 **Using show name:**
@@ -93,6 +96,12 @@ episode-matcher "/path/to/videos" --show "The X-Files"
 ```bash
 episode-matcher "/path/to/videos" --show-id 77398 --no-confirm
 ```
+
+**Using Subtitle Matching Mode:**
+```bash
+episode-matcher "/path/to/videos" --show-id 77398 --match-mode subtitles
+```
+This will extract English subtitles (SRT or PGS) and display them to you. You then manually enter the Season/Episode (e.g., S01E01). For PGS subtitles, it uses OCR to convert the image-based subs to text.
 
 **Process multiple directories:**
 ```bash
@@ -192,4 +201,3 @@ MIT License
 
 - Uses [tesseract-rs](https://crates.io/crates/tesseract-rs) for OCR functionality (wraps [Tesseract OCR](https://github.com/tesseract-ocr/tesseract))
 - Integrates with [TheTVDB API v4](https://thetvdb.com/api-information)
-
