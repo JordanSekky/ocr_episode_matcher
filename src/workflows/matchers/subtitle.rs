@@ -21,12 +21,8 @@ impl Matcher for SubtitleMatcher {
         println!("Using subtitle track {} ({:?})", track.index, track.codec);
 
         let temp_dir = tempfile::TempDir::new()?;
-        let subtitle_path = subtitles::extract_subtitles(
-            file_path,
-            track.index,
-            &track.codec,
-            temp_dir.path(),
-        )?;
+        let subtitle_path =
+            subtitles::extract_subtitles(file_path, track.index, &track.codec, temp_dir.path())?;
         println!("Extracted subtitle to {subtitle_path:?}");
 
         let ocr_engine = match track.codec {
@@ -52,27 +48,27 @@ impl Matcher for SubtitleMatcher {
 fn get_sxxexx_from_stdin() -> Result<(u64, u64)> {
     println!("Please enter SXXEXX (e.g. S01E01):");
     let mut rl = DefaultEditor::new()?;
-    let readline = rl.readline(">> ");
-    match readline {
-        Ok(line) => {
-            let (season, episode) = parse_sxxexx(&line)?;
-            Ok((season, episode))
+    loop {
+        let readline = rl.readline(">> ");
+        match readline {
+            Ok(line) => match parse_sxxexx(line.trim()) {
+                Ok((season, episode)) => return Ok((season, episode)),
+                Err(_) => println!("Invalid format. Please try again (e.g. S01E01)."),
+            },
+            Err(ReadlineError::Interrupted) => {
+                bail!("Interrupted");
+            }
+            Err(ReadlineError::Eof) => {
+                bail!("EOF");
+            }
+            Err(err) => return Err(err.into()),
         }
-        Err(ReadlineError::Interrupted) => {
-            bail!("Interrupted");
-        }
-        Err(ReadlineError::Eof) => {
-            bail!("EOF");
-        }
-        Err(err) => Err(err.into()),
     }
 }
 
 fn parse_sxxexx(input: &str) -> Result<(u64, u64)> {
     let re = regex::Regex::new(r"(?i)^s(\d{1,2})e(\d{1,2})$").unwrap();
-    let caps = re
-        .captures(input)
-        .ok_or(anyhow!("Invalid SXXEXX format"))?;
+    let caps = re.captures(input).ok_or(anyhow!("Invalid SXXEXX format"))?;
     let season: u64 = caps
         .get(1)
         .ok_or(anyhow!("Invalid SXXEXX format"))?
@@ -85,4 +81,3 @@ fn parse_sxxexx(input: &str) -> Result<(u64, u64)> {
         .parse()?;
     Ok((season, episode))
 }
-

@@ -61,9 +61,18 @@ pub fn confirm_rename(old_path: &Path, new_path: &Path) -> bool {
     );
 
     let mut rl = DefaultEditor::new().unwrap();
-    let input = rl.readline("").unwrap_or_default();
+    loop {
+        let input = rl.readline("").unwrap_or_default();
+        let input = input.trim().to_lowercase();
 
-    input.trim().to_lowercase() == "y" || input.trim().to_lowercase() == "yes"
+        if input == "y" || input == "yes" {
+            return true;
+        } else if input == "n" || input == "no" || input.is_empty() {
+            return false;
+        } else {
+            println!("Please enter 'y' or 'n'.");
+        }
+    }
 }
 
 pub fn rename_file(old_path: &Path, new_path: &Path, skip_confirm: bool) -> Result<()> {
@@ -79,4 +88,101 @@ pub fn rename_file(old_path: &Path, new_path: &Path, skip_confirm: bool) -> Resu
     fs::rename(old_path, new_path)?;
     println!("Renamed successfully.");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_sanitize_filename() {
+        assert_eq!(sanitize_filename("Normal Name"), "Normal Name");
+        assert_eq!(sanitize_filename("Name/With/Slashes"), "Name-With-Slashes");
+        assert_eq!(
+            sanitize_filename("Name\\With\\Backslashes"),
+            "Name-With-Backslashes"
+        );
+        assert_eq!(sanitize_filename("Name:With:Colons"), "Name-With-Colons");
+        assert_eq!(sanitize_filename("Name*With*Stars"), "Name-With-Stars");
+        assert_eq!(
+            sanitize_filename("Name?With?Questions"),
+            "Name-With-Questions"
+        );
+        assert_eq!(sanitize_filename("Name\"With\"Quotes"), "Name-With-Quotes");
+        assert_eq!(sanitize_filename("Name<With<Less"), "Name-With-Less");
+        assert_eq!(sanitize_filename("Name>With>Greater"), "Name-With-Greater");
+        assert_eq!(sanitize_filename("Name|With|Pipes"), "Name-With-Pipes");
+        assert_eq!(sanitize_filename("  Trim Me  "), "Trim Me");
+    }
+
+    #[test]
+    fn test_generate_filename() {
+        assert_eq!(
+            generate_filename("Show Name", 1, 1, "Episode Name"),
+            "Show Name - S01E01 - Episode Name.mkv"
+        );
+        assert_eq!(
+            generate_filename("Show: Name", 2, 15, "Ep/isode?"),
+            "Show- Name - S02E15 - Ep-isode-.mkv"
+        );
+    }
+
+    #[test]
+    fn test_find_unique_filename_no_conflict() {
+        let temp_dir = TempDir::new().unwrap();
+        let dir_path = temp_dir.path();
+        let old_path = dir_path.join("original.mkv");
+        let base_filename = "Show - S01E01 - Episode.mkv";
+
+        let unique_path = find_unique_filename(&old_path, dir_path, base_filename);
+        assert_eq!(unique_path, dir_path.join(base_filename));
+    }
+
+    #[test]
+    fn test_find_unique_filename_with_conflict() {
+        let temp_dir = TempDir::new().unwrap();
+        let dir_path = temp_dir.path();
+        let old_path = dir_path.join("original.mkv");
+        let base_filename = "Show - S01E01 - Episode.mkv";
+
+        // Create the conflicting file
+        File::create(dir_path.join(base_filename)).unwrap();
+
+        let unique_path = find_unique_filename(&old_path, dir_path, base_filename);
+        assert_eq!(
+            unique_path,
+            dir_path.join("Show - S01E01 - Episode [copy 1].mkv")
+        );
+
+        // Create the first copy conflict
+        File::create(dir_path.join("Show - S01E01 - Episode [copy 1].mkv")).unwrap();
+        let unique_path_2 = find_unique_filename(&old_path, dir_path, base_filename);
+        assert_eq!(
+            unique_path_2,
+            dir_path.join("Show - S01E01 - Episode [copy 2].mkv")
+        );
+    }
+
+    #[test]
+    fn test_find_unique_filename_same_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let dir_path = temp_dir.path();
+        let filename = "Show - S01E01 - Episode.mkv";
+        let old_path = dir_path.join(filename);
+
+        // Even if the file exists, if it's the *same* file we are renaming (same path),
+        // it should return that path (meaning no actual rename needed or it's overwrite safe in logic terms,
+        // though fs::rename allows overwrite. The function check says `path.to_string_lossy() != old_path.to_string_lossy()`).
+        // Wait, find_unique_filename logic:
+        // while path.exists() && path != old_path
+        // So if path == old_path, the loop condition fails immediately, returning path.
+        // This handles the case where we are renaming a file to its current name (no-op).
+
+        File::create(&old_path).unwrap();
+
+        let unique_path = find_unique_filename(&old_path, dir_path, filename);
+        assert_eq!(unique_path, old_path);
+    }
 }

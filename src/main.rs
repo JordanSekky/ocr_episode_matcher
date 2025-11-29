@@ -175,21 +175,28 @@ fn search_and_select_show(client: &mut TvdbClient, query: &str) -> Result<String
         println!("  {}: {} (ID: {})", i + 1, name, result.tvdb_id);
     }
 
-    print!("Enter number (1-{}): ", results.len());
-    io::stdout().flush()?;
+    loop {
+        print!("Enter number (1-{}): ", results.len());
+        io::stdout().flush()?;
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    let choice: usize = input
-        .trim()
-        .parse()
-        .map_err(|_| anyhow::anyhow!("Invalid selection"))?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let choice: usize = match input.trim().parse() {
+            Ok(n) => n,
+            Err(_) => {
+                println!("Invalid input. Please enter a number.");
+                continue;
+            }
+        };
 
-    if choice < 1 || choice > results.len() {
-        bail!("Invalid selection");
+        if choice >= 1 && choice <= results.len() {
+            return Ok(results[choice - 1].tvdb_id.clone());
+        }
+        println!(
+            "Invalid selection. Please enter a number between 1 and {}.",
+            results.len()
+        );
     }
-
-    Ok(results[choice - 1].tvdb_id.clone())
 }
 
 fn process_file(

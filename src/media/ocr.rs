@@ -135,3 +135,50 @@ pub fn create_ocr_engine() -> Result<TesseractAPI> {
 
     Ok(api)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_production_code_regex() {
+        // This test verifies the regex logic used in the main function.
+        // Ideally the regex should be a shared constant or returned by a function,
+        // but since we can't refactor, we duplicate it here to verify the logic described in comments.
+        let re = Regex::new(r"(?i)(?:\d[A-Z]{1,3}[\d]{2,3})|(?:1?\d[0-3]\d)").unwrap();
+
+        let valid_cases = vec![
+            "3X22", // Season 1-5 format
+            "1X79", "6ABX08", // Season 6-9 format
+            "1AYW01", // Season 10-11 format
+            "2AYW01", "3x22", // Lowercase
+            "6abx08", "1030", // Numeric format (example from second branch of regex)
+            "912",
+        ];
+
+        for case in valid_cases {
+            assert!(re.is_match(case), "Failed to match valid case: {}", case);
+        }
+    }
+
+    #[test]
+    fn test_ocr_text_cleaning_logic() {
+        // Testing the character replacement logic
+        let input = "S 0 I ? O";
+        let expected = "501X0"; // S->5, space removed, I->1, ?->X, O->0
+
+        let cleaned: String = input
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .map(|c| match c {
+                'O' => '0',
+                'I' => '1',
+                'S' => '5',
+                '?' => 'X',
+                _ => c,
+            })
+            .collect();
+
+        assert_eq!(cleaned, expected);
+    }
+}

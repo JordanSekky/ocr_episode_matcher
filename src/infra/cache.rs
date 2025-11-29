@@ -93,3 +93,50 @@ impl Cache {
             || self.episodes_by_sxxexx.contains_key(series_id)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cache_operations() {
+        let mut cache = Cache::default();
+        let series_id = "12345";
+
+        // Test series name
+        cache.set_series_name(series_id.to_string(), "Test Show".to_string());
+        assert_eq!(
+            cache.get_series_name(series_id),
+            Some(&"Test Show".to_string())
+        );
+
+        // Test episode storage and retrieval
+        let episode = EpisodeEntry {
+            production_code: Some("prod123".to_string()),
+            season_number: 1,
+            episode_number: 1,
+            name: "Pilot".to_string(),
+        };
+
+        cache.set_episode(series_id, &episode);
+
+        // Check retrieval by production code (exact)
+        let retrieved = cache.get_episode(series_id, "prod123");
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().name, "Pilot");
+
+        // Check retrieval by production code (case insensitive)
+        let retrieved = cache.get_episode(series_id, "PROD123");
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().name, "Pilot");
+
+        // Check retrieval by SxxExx
+        let retrieved = cache.get_episode_by_sxxexx(series_id, 1, 1);
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().name, "Pilot");
+
+        // Check has_series_episodes
+        assert!(cache.has_series_episodes(series_id));
+        assert!(!cache.has_series_episodes("other_id"));
+    }
+}
