@@ -127,8 +127,8 @@ pub fn process_and_display(
         }
         SubtitleCodec::Pgs => {
             let mut data = fs::read(subtitle_path)?;
-            let pgs = parse_pgs(&mut data)
-                .map_err(|e| anyhow::anyhow!("Failed to parse PGS: {e:?}"))?;
+            let pgs =
+                parse_pgs(&mut data).map_err(|e| anyhow::anyhow!("Failed to parse PGS: {e:?}"))?;
 
             // We need the OCR engine for PGS
             let api = ocr_engine.context("OCR engine required for PGS subtitles")?;
@@ -167,11 +167,23 @@ pub fn process_and_display(
                         .is_ok()
                     {
                         if let Ok(text) = api.get_utf8_text() {
-                            let trimmed = text.trim();
-                            if !trimmed.is_empty()
-                                && writeln!(stdin, "{trimmed}\n").is_err() {
-                                    break;
-                                }
+                            let cleaned_text: String = text
+                                .chars()
+                                .map(|c| match c {
+                                    '|' => 'I', // Replace pipe with capital I
+                                    _ => c,
+                                })
+                                .filter(|c| {
+                                    c.is_alphanumeric()
+                                        || c.is_whitespace()
+                                        || "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~".contains(*c)
+                                })
+                                .collect();
+
+                            let trimmed = cleaned_text.trim();
+                            if !trimmed.is_empty() && writeln!(stdin, "{trimmed}\n").is_err() {
+                                break;
+                            }
                         }
                     }
                 }
@@ -183,4 +195,49 @@ pub fn process_and_display(
 
     let _ = child.wait();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_subtitle_text_cleaning() {
+        let input = "Hello | World! @#$%^&*()";
+        // | -> I
+        // @#$%^&*() are allowed punctuation
+        let expected = "Hello I World! @#$%^&*()";
+
+        let cleaned_text: String = input
+            .chars()
+            .map(|c| match c {
+                '|' => 'I',
+                _ => c,
+            })
+            .filter(|c| {
+                c.is_alphanumeric()
+                    || c.is_whitespace()
+                    || "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~".contains(*c)
+            })
+            .collect();
+
+        assert_eq!(cleaned_text, expected);
+
+        let input_with_invalid = "Hello \u{0000} World \u{001F}"; // Null and Unit Separator
+        let expected_cleaned = "Hello  World ";
+
+        let cleaned_invalid: String = input_with_invalid
+            .chars()
+            .map(|c| match c {
+                '|' => 'I',
+                _ => c,
+            })
+            .filter(|c| {
+                c.is_alphanumeric()
+                    || c.is_whitespace()
+                    || "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~".contains(*c)
+            })
+            .collect();
+
+        // Note: The whitespace check allows spaces, so the control chars are removed but spaces remain
+        assert_eq!(cleaned_invalid.trim(), expected_cleaned.trim());
+    }
 }
