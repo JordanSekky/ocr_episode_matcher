@@ -88,6 +88,7 @@ pub fn extract_subtitles(
     track_index: u32,
     codec: &SubtitleCodec,
     temp_dir: &Path,
+    duration_seconds: u64,
 ) -> Result<std::path::PathBuf> {
     let ext = match codec {
         SubtitleCodec::Srt => "srt",
@@ -95,7 +96,7 @@ pub fn extract_subtitles(
     };
 
     let output_path = temp_dir.join(format!("extracted.{ext}"));
-    ffmpeg::extract_subtitle_track(path, track_index, &output_path)?;
+    ffmpeg::extract_subtitle_track(path, track_index, &output_path, duration_seconds)?;
 
     Ok(output_path)
 }

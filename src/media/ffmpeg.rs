@@ -31,10 +31,12 @@ pub fn extract_subtitle_track(
     input_path: &Path,
     track_index: u32,
     output_path: &Path,
+    duration_seconds: u64,
 ) -> Result<()> {
     let output_str = output_path
         .to_str()
         .context("Invalid output path for subtitles")?;
+    let duration = duration_seconds.to_string();
 
     let output = Command::new("ffmpeg")
         .args([
@@ -45,6 +47,8 @@ pub fn extract_subtitle_track(
             &format!("0:{track_index}"),
             "-c:s",
             "copy",
+            "-t",
+            &duration,
             output_str,
         ])
         .output()

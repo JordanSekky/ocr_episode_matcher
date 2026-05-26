@@ -38,4 +38,8 @@ pub struct Cli {
     /// Matching mode
     #[arg(long, default_value = "production-code")]
     pub match_mode: MatchMode,
+
+    /// Maximum duration (in seconds) to extract subtitles for
+    #[arg(long = "subtitle-duration", default_value_t = 300)]
+    pub subtitle_duration: u64,
 }

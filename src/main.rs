@@ -84,6 +84,7 @@ fn run(cli: Cli) -> Result<()> {
             &mut cache,
             cli.prompt_size,
             &cli.match_mode,
+            cli.subtitle_duration,
         ) {
             eprintln!("Error processing path {input_path:?}: {e}");
             // Continue processing other paths
@@ -107,6 +108,7 @@ fn process_input_path(
     cache: &mut Cache,
     prompt_size: Option<u64>,
     match_mode: &MatchMode,
+    subtitle_duration: u64,
 ) -> Result<()> {
     if input_path.is_file() {
         process_file(
@@ -117,6 +119,7 @@ fn process_input_path(
             cache,
             prompt_size,
             match_mode,
+            subtitle_duration,
         )?;
     } else if input_path.is_dir() {
         process_directory(
@@ -128,6 +131,7 @@ fn process_input_path(
             cache,
             prompt_size,
             match_mode,
+            subtitle_duration,
         )?;
     } else {
         bail!("Input path is neither a file nor a directory");
@@ -207,6 +211,7 @@ fn process_file(
     cache: &mut Cache,
     prompt_size: Option<u64>,
     match_mode: &MatchMode,
+    subtitle_duration: u64,
 ) -> Result<()> {
     if file_path.extension().and_then(|s| s.to_str()) != Some("mkv") {
         bail!("Skipping non-MKV file: {file_path:?}");
@@ -216,7 +221,9 @@ fn process_file(
 
     let matcher: Box<dyn Matcher> = match match_mode {
         MatchMode::ProductionCode => Box::new(ProductionCodeMatcher { prompt_size }),
-        MatchMode::Subtitles => Box::new(SubtitleMatcher),
+        MatchMode::Subtitles => Box::new(SubtitleMatcher {
+            duration_seconds: subtitle_duration,
+        }),
     };
 
     let episode = matcher.match_episode(file_path, series_id, cache)?;
@@ -258,6 +265,7 @@ fn process_directory(
     cache: &mut Cache,
     prompt_size: Option<u64>,
     match_mode: &MatchMode,
+    subtitle_duration: u64,
 ) -> Result<()> {
     let mkv_files = collect_mkv_files(dir_path, recursive)?;
 
@@ -272,6 +280,7 @@ fn process_directory(
             cache,
             prompt_size,
             match_mode,
+            subtitle_duration,
         ) {
             eprintln!("Error processing {file_path:?}: {e}");
             // Continue processing other files

@@ -8,7 +8,9 @@ use crate::domain::models::EpisodeEntry;
 use crate::infra::cache::Cache;
 use crate::media::{ocr, subtitles};
 
-pub struct SubtitleMatcher;
+pub struct SubtitleMatcher {
+    pub duration_seconds: u64,
+}
 
 impl Matcher for SubtitleMatcher {
     fn match_episode(
@@ -21,8 +23,13 @@ impl Matcher for SubtitleMatcher {
         println!("Using subtitle track {} ({:?})", track.index, track.codec);
 
         let temp_dir = tempfile::TempDir::new()?;
-        let subtitle_path =
-            subtitles::extract_subtitles(file_path, track.index, &track.codec, temp_dir.path())?;
+        let subtitle_path = subtitles::extract_subtitles(
+            file_path,
+            track.index,
+            &track.codec,
+            temp_dir.path(),
+            self.duration_seconds,
+        )?;
         println!("Extracted subtitle to {subtitle_path:?}");
 
         let ocr_engine = match track.codec {
