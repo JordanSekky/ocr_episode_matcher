@@ -2,8 +2,8 @@ use anyhow::Result;
 use rustyline::DefaultEditor;
 use std::path::Path;
 
-use super::{MatchContext, Matcher};
-use crate::domain::models::{parse_sxxexx, EpisodeEntry};
+use super::{EpisodeMatch, MatchContext, Matcher};
+use crate::domain::models::parse_sxxexx;
 use crate::infra::cache::Cache;
 use crate::media::ocr;
 
@@ -18,7 +18,7 @@ impl Matcher for ProductionCodeMatcher {
         series_id: &str,
         cache: &mut Cache,
         _ctx: &MatchContext,
-    ) -> Result<Option<EpisodeEntry>> {
+    ) -> Result<Option<EpisodeMatch>> {
         // Extract production code
         let production_code_candidates =
             ocr::extract_production_code_candidates(file_path.to_str().unwrap())?;
@@ -27,7 +27,7 @@ impl Matcher for ProductionCodeMatcher {
             .into_iter()
             .find_map(|code| cache.get_episode(series_id, &code).cloned())
         {
-            return Ok(Some(episode));
+            return Ok(Some(EpisodeMatch::unconfirmed(episode)));
         }
 
         if self.prompt_size.is_some() && file_path.metadata()?.len() > self.prompt_size.unwrap() {
@@ -46,7 +46,7 @@ impl Matcher for ProductionCodeMatcher {
                 });
 
                 if let Some(episode) = episode {
-                    return Ok(Some(episode));
+                    return Ok(Some(EpisodeMatch::unconfirmed(episode)));
                 }
                 println!("Episode not found or invalid format. Please try again.");
             }

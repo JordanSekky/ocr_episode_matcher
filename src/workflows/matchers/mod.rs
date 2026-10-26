@@ -44,6 +44,31 @@ pub struct MatchContext<'a> {
     pub show_name: &'a str,
 }
 
+/// The episode a matcher settled on for a file.
+#[derive(Debug)]
+pub struct EpisodeMatch {
+    pub episode: EpisodeEntry,
+    /// The user accepted or chose this episode at a prompt, so the rename needs no second
+    /// confirmation.
+    pub confirmed: bool,
+}
+
+impl EpisodeMatch {
+    pub fn confirmed(episode: EpisodeEntry) -> Self {
+        Self {
+            episode,
+            confirmed: true,
+        }
+    }
+
+    pub fn unconfirmed(episode: EpisodeEntry) -> Self {
+        Self {
+            episode,
+            confirmed: false,
+        }
+    }
+}
+
 pub trait Matcher {
     fn match_episode(
         &self,
@@ -51,7 +76,7 @@ pub trait Matcher {
         series_id: &str,
         cache: &mut Cache,
         ctx: &MatchContext,
-    ) -> Result<Option<EpisodeEntry>>;
+    ) -> Result<Option<EpisodeMatch>>;
 }
 
 pub mod llm;

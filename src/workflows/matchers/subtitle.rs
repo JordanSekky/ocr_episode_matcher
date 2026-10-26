@@ -3,16 +3,19 @@ use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::path::Path;
 
-use super::{llm, MatchContext, Matcher};
+use super::{llm, EpisodeMatch, MatchContext, Matcher};
 use crate::domain::models::{parse_sxxexx, EpisodeEntry};
 use crate::infra::cache::Cache;
 use crate::infra::ollama::OllamaClient;
 use crate::media::{ffmpeg, ocr, subtitles};
 
 pub struct SubtitleMatcher {
+    pub start_seconds: u64,
     pub duration_seconds: u64,
     pub prefer_codec: subtitles::SubtitleCodec,
     pub skip_confirm: bool,
+    /// Offer specials (season 0) to the model as well as regular episodes.
+    pub include_specials: bool,
     pub ollama: Option<OllamaClient>,
 }
 
@@ -23,7 +26,7 @@ impl Matcher for SubtitleMatcher {
         series_id: &str,
         cache: &mut Cache,
         ctx: &MatchContext,
-    ) -> Result<Option<EpisodeEntry>> {
+    ) -> Result<Option<EpisodeMatch>> {
         let track = subtitles::find_best_subtitle_track(file_path, self.prefer_codec)?;
         println!("Using subtitle track {} ({:?})", track.index, track.codec);
 
@@ -33,6 +36,7 @@ impl Matcher for SubtitleMatcher {
             track.index,
             &track.codec,
             temp_dir.path(),
+            self.start_seconds,
             self.duration_seconds,
         )?;
         println!("Extracted subtitle to {subtitle_path:?}");
@@ -55,7 +59,15 @@ impl Matcher for SubtitleMatcher {
         };
 
         if let Some(client) = &self.ollama {
-            match suggest_episode(client, &lines, series_id, cache, ctx, file_minutes) {
+            match suggest_episode(
+                client,
+                &lines,
+                series_id,
+                cache,
+                ctx,
+                file_minutes,
+                self.include_specials,
+            ) {
                 Ok(Suggestion::Episode(episode, suggestion)) => {
                     println!(
                         "Suggested: S{:02}E{:02} - {} (confidence: {})",
@@ -69,9 +81,10 @@ impl Matcher for SubtitleMatcher {
                     }
 
                     if self.skip_confirm {
-                        return Ok(Some(episode));
+                        return Ok(Some(EpisodeMatch::unconfirmed(episode)));
                     }
-                    return confirm_suggestion(Some(episode), &lines, series_id, cache);
+                    return Ok(confirm_suggestion(Some(episode), &lines, series_id, cache)?
+                        .map(EpisodeMatch::confirmed));
                 }
                 Ok(Suggestion::NoMatch { reasoning }) => {
                     println!("Ollama found no matching episode (possibly an extra or other non-episode file).");
@@ -83,7 +96,8 @@ impl Matcher for SubtitleMatcher {
                     if self.skip_confirm {
                         return Ok(None);
                     }
-                    return confirm_suggestion(None, &lines, series_id, cache);
+                    return Ok(confirm_suggestion(None, &lines, series_id, cache)?
+                        .map(EpisodeMatch::confirmed));
                 }
                 Ok(Suggestion::Unusable(reason)) => {
                     eprintln!("Ollama's answer was rejected: {reason}.");
@@ -107,7 +121,8 @@ impl Matcher for SubtitleMatcher {
                 "Failed to find episode matching 'S{season}E{episode}' in cache for series {series_id}"
             );
         }
-        Ok(found)
+        // A typed-in code gets the rename prompt as a second look at what it resolved to
+        Ok(found.map(EpisodeMatch::unconfirmed))
     }
 }
 
@@ -140,10 +155,16 @@ fn suggest_episode(
     cache: &Cache,
     ctx: &MatchContext,
     file_minutes: Option<u64>,
+    include_specials: bool,
 ) -> Result<Suggestion> {
-    let all = cache.episodes_for_series(series_id);
+    let mut all = cache.episodes_for_series(series_id);
     if all.is_empty() {
         bail!("no cached episodes for series {series_id}");
+    }
+    // Specials are mostly extras and short webisodes that crowd out the real episodes. A series
+    // with nothing but specials keeps them.
+    if !include_specials && all.iter().any(|ep| ep.season_number != 0) {
+        all.retain(|ep| ep.season_number != 0);
     }
 
     let candidates = llm::select_candidates(&all, ctx);

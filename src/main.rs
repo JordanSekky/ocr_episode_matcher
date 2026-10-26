@@ -17,7 +17,8 @@ use infra::cache::Cache;
 use infra::ollama::OllamaClient;
 use infra::tvdb::TvdbClient;
 use workflows::matchers::{
-    prod_code::ProductionCodeMatcher, subtitle::SubtitleMatcher, MatchContext, Matcher, RipContext,
+    prod_code::ProductionCodeMatcher, subtitle::SubtitleMatcher, EpisodeMatch, MatchContext,
+    Matcher, RipContext,
 };
 use workflows::renamer;
 
@@ -117,9 +118,11 @@ fn run(cli: Cli) -> Result<()> {
             prompt_size: cli.prompt_size,
         }),
         MatchMode::Subtitles => Box::new(SubtitleMatcher {
+            start_seconds: cli.subtitle_start,
             duration_seconds: cli.subtitle_duration,
             prefer_codec: cli.prefer_codec,
             skip_confirm: cli.no_confirm,
+            include_specials: cli.include_specials,
             ollama,
         }),
     };
@@ -251,11 +254,11 @@ fn process_file(
 
     println!("Processing: {file_path:?}");
 
-    let episode = session
+    let matched = session
         .matcher
         .match_episode(file_path, session.series_id, cache, ctx)?;
 
-    let Some(episode) = episode else {
+    let Some(EpisodeMatch { episode, confirmed }) = matched else {
         eprintln!("Warning: No matching episode found for {file_path:?}");
         return Ok(None);
     };
@@ -277,8 +280,8 @@ fn process_file(
     let directory = file_path.parent().unwrap_or(Path::new("."));
     let new_path = renamer::find_unique_filename(file_path, directory, &new_filename);
 
-    // Rename file
-    let applied = renamer::rename_file(file_path, &new_path, session.skip_confirm)?;
+    // Accepting the match at the prompt already approved the rename
+    let applied = renamer::rename_file(file_path, &new_path, session.skip_confirm || confirmed)?;
 
     // Only confirmed matches count as locality hints for the following files
     Ok(applied.then_some(episode))

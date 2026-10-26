@@ -96,8 +96,10 @@ episode-matcher "/path/to/dir1" "/path/to/dir2" "/path/to/file.mkv" --show-id 77
 - `--match-mode <mode>` - Matching strategy: `prod-code` (default) or `subtitles`
 - `--no-confirm` - Skip confirmation prompts (useful for batch processing)
 - `--prompt-size <bytes>` - For files larger than this size, prompt for production code manually if OCR fails (only for `prod-code` mode)
+- `--subtitle-start <seconds>` - How far into each file to start reading subtitles, e.g. to skip a "previously on" recap (only for `subtitles` mode, default 0)
 - `--subtitle-duration <seconds>` - How much of each file's subtitles to extract (only for `subtitles` mode, default 300)
 - `--prefer-codec <codec>` - Which English subtitle track to read when a file has several: `subrip` (default), `dvdsub` or `pgs`. Falls back to the other codecs if the file has none of the preferred one (only for `subtitles` mode)
+- `--include-specials` - Also offer specials (season 0) to Ollama, which leaves them out by default (only used with Ollama)
 - `--hint <SxxExx>` - Roughly where the first file of each input directory sits in the series, e.g. `S03E01` (only used with Ollama; see below)
 
 ### Examples
@@ -131,7 +133,16 @@ For each file, the model is shown the subtitle text, the episode descriptions an
 - type an episode (e.g. `S01E05`) to override it
 - type `v` to view the subtitles in your pager first
 
-Duplicates are fine: rips often contain several copies of the same episode, and some files are long ones with several or all of the disc's episodes back to back. The model is told this, and for a combined file it answers with the first episode, since only the start of the subtitles is read.
+Accepting or overriding here is the confirmation, so the file is renamed without a second prompt.
+
+Duplicates happen: rips can hold several copies of the same episode, and some files are long ones with several or all of the disc's episodes back to back. The model is told this, and for a combined file it answers with the first episode, since only the start of the subtitles is read. It is also told that a run of neighbouring files matched to one episode is more likely a repeated mistake than a run of copies.
+
+Specials (season 0) are left out of the episodes offered to the model, because they are mostly extras and short webisodes that crowd out the real episodes. Pass `--include-specials` to offer them too; you can always type one in by hand.
+
+**Recaps:** many shows open each episode with a "previously on" recap of clips from earlier episodes, which can lead the model to match every file to the episodes being recapped (often the pilot). Skip it with `--subtitle-start`, and consider reading a longer stretch so there is enough of the episode itself to go on:
+```bash
+episode-matcher "/path/to/disc" --show-id 83237 --match-mode subtitles --subtitle-start 150 --subtitle-duration 600
+```
 
 Not every file is an episode (extras, recaps and play-all tracks are common on discs), so the model may answer "no match". In that case Enter skips the file, and you can still type an episode to assign one by hand. With `--no-confirm`, suggestions are accepted automatically and no-match files are skipped.
 

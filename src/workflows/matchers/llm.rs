@@ -21,15 +21,24 @@ You are given the show's episode list with descriptions, a listing of the video 
 same disc rip, and the subtitle text from the start of the current file. \
 The dialogue and events in the subtitles are the main evidence; match them against the episode \
 descriptions. Theme songs, opening titles and credits are the same in every episode, so they \
-tell you nothing: look past them to the story. The episode descriptions are short and often \
+tell you nothing: look past them to the story. \
+Many episodes open with a \"previously on\" recap: a minute or two of short clips from earlier \
+episodes, jumping between unrelated scenes. Recap dialogue comes from earlier episodes, so it \
+tells you which episodes came before this one, not which one this is. This matters most early in \
+a show, when the first episodes are replayed in the recaps of the ones that follow. Find where \
+the recap ends and the scenes start running continuously, identify the episode from the dialogue \
+after that point, and expect it to come after the episodes the recap showed. The episode descriptions are short and often \
 leave out names and details, so match on the premise and the kind of story rather than \
 requiring names from the dialogue to appear in a description; an episode's title is often \
 echoed in its dialogue. \
 Files from a disc rip are usually, but not always, in episode order, so neighbouring files are \
 often consecutive episodes: use the known matches of nearby files as a prior, but let the \
 dialogue win. \
-Duplicates are fine: rips often contain several copies of the same episode, so a file may \
-legitimately match the same episode as another file, and that is not a reason to doubt it. \
+Duplicates happen but are the exception: a rip may hold several copies of the same episode, \
+such as a play-all track or an extended cut, so a file can match the same episode as another \
+file. A run of neighbouring files all matched to one episode is more likely an earlier mistake \
+being repeated than a run of copies, so in that case check the dialogue against the other \
+candidates before agreeing with the neighbours. \
 Some files are long and contain several or all of the episodes on the disc back to back; the \
 subtitles you are shown only cover the start of the file, so answer with the first episode in \
 it and mention in your analysis if you suspect the file is combined. \
@@ -45,7 +54,8 @@ Not every file is an episode: discs also hold extras, featurettes, trailers, rec
 tracks and menus, and the subtitles may be empty or too short to tell. \"No match\" is an \
 acceptable and often correct answer. If the subtitles do not clearly correspond to one of the \
 listed episodes, answer NO MATCH rather than guessing. \
-Write your analysis first: note the distinctive names, places and events in the dialogue, \
+Write your analysis first: say whether the file opens with a recap and where it ends, note the \
+distinctive names, places and events in the dialogue after it, \
 compare them with the episode descriptions, and say which candidate fits best and why. \
 Then give your answer: copy the label of that candidate exactly as it appears at the start of \
 its line (for example \"S02E01 - Title\"), or NO MATCH. Finally give your confidence.";
@@ -459,8 +469,10 @@ mod tests {
             show_name: "Show",
         };
         let (system, _) = build_prompt(&[], &[episode(1, 1)], &ctx, None);
-        assert!(system.contains("Duplicates are fine"));
+        assert!(system.contains("Duplicates happen but are the exception"));
         assert!(system.contains("several copies of the same episode"));
+        // A streak of one episode should prompt a second look, not reassure the model.
+        assert!(system.contains("more likely an earlier mistake"));
         assert!(system.contains("all of the episodes on the disc back to back"));
         assert!(system.contains("answer with the first episode"));
         // The old rule against reusing an already-matched episode must be gone.
@@ -698,6 +710,21 @@ mod tests {
         assert!(system.contains("\"No match\" is an acceptable"));
         assert!(system.contains("answer NO MATCH rather than guessing"));
         assert!(system.contains("Theme songs, opening titles and credits are the same"));
+    }
+
+    /// Recaps replay earlier episodes, which once matched a whole disc to the pilot.
+    #[test]
+    fn test_prompt_discounts_recaps() {
+        let rip = rip(1);
+        let ctx = MatchContext {
+            rip: &rip,
+            index: 0,
+            show_name: "Show",
+        };
+        let (system, _) = build_prompt(&[], &[episode(1, 1)], &ctx, None);
+        assert!(system.contains("\"previously on\" recap"));
+        assert!(system.contains("not which one this is"));
+        assert!(system.contains("whether the file opens with a recap"));
     }
 
     #[test]

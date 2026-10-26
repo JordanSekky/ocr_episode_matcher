@@ -110,6 +110,7 @@ pub fn extract_subtitles(
     track_index: u32,
     codec: &SubtitleCodec,
     temp_dir: &Path,
+    start_seconds: u64,
     duration_seconds: u64,
 ) -> Result<PathBuf> {
     let ext = match codec {
@@ -119,13 +120,25 @@ pub fn extract_subtitles(
             // ffmpeg can't copy DVD subtitles into a standalone file, so render them to images
             let frames_dir = temp_dir.join("dvdsub_frames");
             fs::create_dir(&frames_dir)?;
-            ffmpeg::extract_subtitle_frames(path, track_index, &frames_dir, duration_seconds)?;
+            ffmpeg::extract_subtitle_frames(
+                path,
+                track_index,
+                &frames_dir,
+                start_seconds,
+                duration_seconds,
+            )?;
             return Ok(frames_dir);
         }
     };
 
     let output_path = temp_dir.join(format!("extracted.{ext}"));
-    ffmpeg::extract_subtitle_track(path, track_index, &output_path, duration_seconds)?;
+    ffmpeg::extract_subtitle_track(
+        path,
+        track_index,
+        &output_path,
+        start_seconds,
+        duration_seconds,
+    )?;
 
     Ok(output_path)
 }

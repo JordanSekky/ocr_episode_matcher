@@ -88,7 +88,10 @@ pub fn rename_file(old_path: &Path, new_path: &Path, skip_confirm: bool) -> Resu
     }
 
     fs::rename(old_path, new_path)?;
-    println!("Renamed successfully.");
+    println!(
+        "Renamed to \"{}\".",
+        new_path.file_name().unwrap().to_string_lossy()
+    );
     Ok(true)
 }
 

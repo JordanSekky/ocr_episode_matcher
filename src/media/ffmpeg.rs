@@ -67,16 +67,20 @@ pub fn extract_subtitle_track(
     input_path: &Path,
     track_index: u32,
     output_path: &Path,
+    start_seconds: u64,
     duration_seconds: u64,
 ) -> Result<()> {
     let output_str = output_path
         .to_str()
         .context("Invalid output path for subtitles")?;
+    let start = start_seconds.to_string();
     let duration = duration_seconds.to_string();
 
     let output = Command::new("ffmpeg")
         .args([
             "-y",
+            "-ss",
+            &start,
             "-i",
             input_path.to_str().context("Invalid input path")?,
             "-map",
@@ -108,9 +112,11 @@ pub fn extract_subtitle_frames(
     input_path: &Path,
     track_index: u32,
     output_dir: &Path,
+    start_seconds: u64,
     duration_seconds: u64,
 ) -> Result<()> {
     let output_pattern = output_dir.join("%012d.png");
+    let start = start_seconds.to_string();
     let duration = duration_seconds.to_string();
 
     // `-t` goes before `-i` because the rendered frames start at the first subtitle, not at 0,
@@ -118,6 +124,8 @@ pub fn extract_subtitle_frames(
     let output = Command::new("ffmpeg")
         .args([
             "-y",
+            "-ss",
+            &start,
             "-t",
             &duration,
             "-i",

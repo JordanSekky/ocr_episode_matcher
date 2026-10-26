@@ -42,6 +42,10 @@ pub struct Cli {
     #[arg(long, default_value = "production-code")]
     pub match_mode: MatchMode,
 
+    /// Seconds into each file to start reading subtitles, e.g. to skip a "previously on" recap
+    #[arg(long = "subtitle-start", default_value_t = 0)]
+    pub subtitle_start: u64,
+
     /// Maximum duration (in seconds) to extract subtitles for
     #[arg(long = "subtitle-duration", default_value_t = 300)]
     pub subtitle_duration: u64,
@@ -50,6 +54,11 @@ pub struct Cli {
     /// if it has none of this codec)
     #[arg(long = "prefer-codec", value_enum, default_value = "subrip")]
     pub prefer_codec: SubtitleCodec,
+
+    /// Also offer specials (season 0) to Ollama. They are left out by default because they are
+    /// mostly extras and short webisodes; they can still be entered by hand.
+    #[arg(long)]
+    pub include_specials: bool,
 
     /// Roughly where the first file of each input directory sits in the series (e.g. S03E01).
     /// Narrows the episodes offered to Ollama until an earlier file has been matched.
