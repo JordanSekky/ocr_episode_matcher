@@ -101,29 +101,20 @@ pub fn extract_subtitles(
     Ok(output_path)
 }
 
-pub fn process_and_display(
+/// Reads the extracted subtitle file into plain text lines (no SRT indexes or timestamps).
+/// PGS tracks are OCR'd, so `ocr_engine` is required for them.
+pub fn extract_text(
     subtitle_path: &Path,
     codec: &SubtitleCodec,
     ocr_engine: Option<tesseract_rs::TesseractAPI>,
-) -> Result<()> {
-    let pager = std::env::var("PAGER").unwrap_or_else(|_| "less".to_string());
-
-    let mut child = Command::new(pager)
-        .stdin(Stdio::piped())
-        .spawn()
-        .context("Failed to spawn pager")?;
-
-    let mut stdin = child.stdin.take().context("Failed to open pager stdin")?;
+) -> Result<Vec<String>> {
+    let mut lines = Vec::new();
 
     match codec {
         SubtitleCodec::Srt => {
             let file = File::open(subtitle_path)?;
-            let reader = BufReader::new(file);
-            for line in reader.lines() {
-                let line = line?;
-                if writeln!(stdin, "{line}").is_err() {
-                    break; // Pager closed
-                }
+            for line in BufReader::new(file).lines() {
+                push_srt_line(&mut lines, line?);
             }
         }
         SubtitleCodec::Pgs => {
@@ -168,77 +159,121 @@ pub fn process_and_display(
                         .is_ok()
                     {
                         if let Ok(text) = api.get_utf8_text() {
-                            let cleaned_text: String = text
-                                .chars()
-                                .map(|c| match c {
-                                    '|' => 'I', // Replace pipe with capital I
-                                    _ => c,
-                                })
-                                .filter(|c| {
-                                    c.is_alphanumeric()
-                                        || c.is_whitespace()
-                                        || "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~".contains(*c)
-                                })
-                                .collect();
-
+                            let cleaned_text = clean_ocr_text(&text);
                             let trimmed = cleaned_text.trim();
-                            if !trimmed.is_empty() && writeln!(stdin, "{trimmed}\n").is_err() {
-                                break;
+                            if !trimmed.is_empty() {
+                                lines.push(trimmed.to_string());
+                                lines.push(String::new());
                             }
                         }
                     }
                 }
             }
-            // Drop stdin to close the pipe and signal EOF to the pager
-            drop(stdin);
         }
     }
 
+    Ok(lines)
+}
+
+/// Appends an SRT line, dropping cue timestamps and the numeric cue index before them.
+fn push_srt_line(lines: &mut Vec<String>, line: String) {
+    let line = line.trim_start_matches('\u{feff}').trim_end().to_string();
+
+    if line.contains("-->") {
+        if lines
+            .last()
+            .is_some_and(|prev| !prev.is_empty() && prev.chars().all(|c| c.is_ascii_digit()))
+        {
+            lines.pop();
+        }
+        return;
+    }
+
+    // Collapse runs of blank lines between cues
+    if line.is_empty() && lines.last().is_none_or(|prev| prev.is_empty()) {
+        return;
+    }
+    lines.push(line);
+}
+
+pub fn display_lines(lines: &[String]) -> Result<()> {
+    let pager = std::env::var("PAGER").unwrap_or_else(|_| "less".to_string());
+
+    let mut child = Command::new(pager)
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("Failed to spawn pager")?;
+
+    let mut stdin = child.stdin.take().context("Failed to open pager stdin")?;
+
+    for line in lines {
+        if writeln!(stdin, "{line}").is_err() {
+            break; // Pager closed
+        }
+    }
+
+    // Drop stdin to close the pipe and signal EOF to the pager
+    drop(stdin);
     let _ = child.wait();
     Ok(())
 }
 
+/// Replaces the `|` that Tesseract emits for a capital I and strips anything unprintable.
+fn clean_ocr_text(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '|' => 'I', // Replace pipe with capital I
+            _ => c,
+        })
+        .filter(|c| {
+            c.is_alphanumeric()
+                || c.is_whitespace()
+                || "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~".contains(*c)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn test_subtitle_text_cleaning() {
         let input = "Hello | World! @#$%^&*()";
         // | -> I
         // @#$%^&*() are allowed punctuation
-        let expected = "Hello I World! @#$%^&*()";
-
-        let cleaned_text: String = input
-            .chars()
-            .map(|c| match c {
-                '|' => 'I',
-                _ => c,
-            })
-            .filter(|c| {
-                c.is_alphanumeric()
-                    || c.is_whitespace()
-                    || "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~".contains(*c)
-            })
-            .collect();
-
-        assert_eq!(cleaned_text, expected);
+        assert_eq!(clean_ocr_text(input), "Hello I World! @#$%^&*()");
 
         let input_with_invalid = "Hello \u{0000} World \u{001F}"; // Null and Unit Separator
         let expected_cleaned = "Hello  World ";
 
-        let cleaned_invalid: String = input_with_invalid
-            .chars()
-            .map(|c| match c {
-                '|' => 'I',
-                _ => c,
-            })
-            .filter(|c| {
-                c.is_alphanumeric()
-                    || c.is_whitespace()
-                    || "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~".contains(*c)
-            })
-            .collect();
-
         // Note: The whitespace check allows spaces, so the control chars are removed but spaces remain
-        assert_eq!(cleaned_invalid.trim(), expected_cleaned.trim());
+        assert_eq!(
+            clean_ocr_text(input_with_invalid).trim(),
+            expected_cleaned.trim()
+        );
+    }
+
+    fn srt_lines(input: &str) -> Vec<String> {
+        let mut lines = Vec::new();
+        for line in input.lines() {
+            push_srt_line(&mut lines, line.to_string());
+        }
+        lines
+    }
+
+    #[test]
+    fn test_srt_strips_indexes_and_timestamps() {
+        let input = "1\n00:00:01,000 --> 00:00:03,000\nHello there.\n\n2\n00:00:04,000 --> 00:00:06,000\n42\nGeneral Kenobi.\n";
+        assert_eq!(
+            srt_lines(input),
+            vec!["Hello there.", "", "42", "General Kenobi."]
+        );
+    }
+
+    #[test]
+    fn test_srt_collapses_blank_lines_and_strips_bom() {
+        let input = "\u{feff}1\n00:00:01,000 --> 00:00:03,000\nOne\n\n\n\n2\n00:00:04,000 --> 00:00:06,000\nTwo\n";
+        assert_eq!(srt_lines(input), vec!["One", "", "Two"]);
     }
 }

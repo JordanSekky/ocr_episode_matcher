@@ -2,7 +2,7 @@ use crate::config::get_cache_path;
 use crate::domain::models::EpisodeEntry;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -10,16 +10,28 @@ pub struct Cache {
     pub series: HashMap<String, String>, // series_id -> series_name
     pub episodes_by_production_code: HashMap<String, HashMap<String, EpisodeEntry>>, // series_id -> production_code -> episode_info
     pub episodes_by_sxxexx: HashMap<String, HashMap<u64, HashMap<u64, EpisodeEntry>>>, // series_id -> season_number -> episode_number -> episode_info
+    /// Series whose episodes were cached with overviews, air dates and runtimes. Caches from
+    /// before those were stored lack this, so such series are refreshed once when they're needed.
+    #[serde(default)]
+    pub detailed_series: HashSet<String>,
 }
 
 impl Cache {
     pub fn load() -> Self {
         let cache_path = get_cache_path();
         if cache_path.exists() {
-            if let Ok(content) = fs::read_to_string(&cache_path) {
-                if let Ok(cache) = serde_json::from_str(&content) {
-                    return cache;
-                }
+            match fs::read_to_string(&cache_path) {
+                Ok(content) => match serde_json::from_str(&content) {
+                    Ok(cache) => return cache,
+                    Err(e) => eprintln!(
+                        "Warning: Ignoring unreadable cache {}: {e}",
+                        cache_path.display()
+                    ),
+                },
+                Err(e) => eprintln!(
+                    "Warning: Failed to read cache {}: {e}",
+                    cache_path.display()
+                ),
             }
         }
         Cache::default()
@@ -92,6 +104,30 @@ impl Cache {
         self.episodes_by_production_code.contains_key(series_id)
             || self.episodes_by_sxxexx.contains_key(series_id)
     }
+
+    /// All cached episodes for a series in aired order, with specials (season 0) last.
+    pub fn episodes_for_series(&self, series_id: &str) -> Vec<EpisodeEntry> {
+        let mut episodes: Vec<EpisodeEntry> = self
+            .episodes_by_sxxexx
+            .get(series_id)
+            .map(|seasons| {
+                seasons
+                    .values()
+                    .flat_map(|episodes| episodes.values().cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        episodes.sort_by_key(|ep| (ep.season_number == 0, ep.season_number, ep.episode_number));
+        episodes
+    }
+
+    pub fn mark_series_detailed(&mut self, series_id: &str) {
+        self.detailed_series.insert(series_id.to_string());
+    }
+
+    pub fn is_series_detailed(&self, series_id: &str) -> bool {
+        self.detailed_series.contains(series_id)
+    }
 }
 
 #[cfg(test)]
@@ -116,6 +152,9 @@ mod tests {
             season_number: 1,
             episode_number: 1,
             name: "Pilot".to_string(),
+            overview: None,
+            aired: None,
+            runtime: None,
         };
 
         cache.set_episode(series_id, &episode);
@@ -138,5 +177,63 @@ mod tests {
         // Check has_series_episodes
         assert!(cache.has_series_episodes(series_id));
         assert!(!cache.has_series_episodes("other_id"));
+    }
+
+    fn entry(season: u64, episode: u64, overview: Option<&str>) -> EpisodeEntry {
+        EpisodeEntry {
+            production_code: None,
+            season_number: season,
+            episode_number: episode,
+            name: format!("S{season}E{episode}"),
+            overview: overview.map(str::to_string),
+            aired: None,
+            runtime: None,
+        }
+    }
+
+    #[test]
+    fn test_episodes_for_series_order() {
+        let mut cache = Cache::default();
+        for (s, e) in [(1, 2), (0, 1), (2, 1), (1, 1)] {
+            cache.set_episode("1", &entry(s, e, None));
+        }
+
+        let order: Vec<(u64, u64)> = cache
+            .episodes_for_series("1")
+            .iter()
+            .map(|ep| (ep.season_number, ep.episode_number))
+            .collect();
+        assert_eq!(order, vec![(1, 1), (1, 2), (2, 1), (0, 1)]);
+        assert!(cache.episodes_for_series("missing").is_empty());
+    }
+
+    #[test]
+    fn test_series_detailed_marker() {
+        let mut cache = Cache::default();
+        cache.set_episode("1", &entry(1, 1, None));
+        assert!(!cache.is_series_detailed("1"));
+        cache.mark_series_detailed("1");
+        assert!(cache.is_series_detailed("1"));
+        assert!(!cache.is_series_detailed("2"));
+    }
+
+    #[test]
+    fn test_old_cache_without_overview_deserializes() {
+        let json = r#"{
+            "series": {},
+            "episodes_by_production_code": {},
+            "episodes_by_sxxexx": {"1": {"1": {"1": {
+                "production_code": null,
+                "season_number": 1,
+                "episode_number": 1,
+                "name": "Pilot"
+            }}}}
+        }"#;
+        let cache: Cache = serde_json::from_str(json).unwrap();
+        let ep = cache.get_episode_by_sxxexx("1", 1, 1).unwrap();
+        assert_eq!(ep.name, "Pilot");
+        assert!(ep.overview.is_none());
+        assert!(ep.runtime.is_none());
+        assert!(!cache.is_series_detailed("1"));
     }
 }
