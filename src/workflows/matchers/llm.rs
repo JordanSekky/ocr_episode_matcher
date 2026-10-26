@@ -7,33 +7,48 @@ use super::MatchContext;
 use crate::domain::models::EpisodeEntry;
 
 /// Episodes either side of the expected position that are still sent to the model.
-const LOCALITY_WINDOW: usize = 15;
+const LOCALITY_WINDOW: usize = 7;
 /// Neighbouring files either side of the current one listed in the prompt.
 const NEIGHBOUR_FILES: usize = 5;
 const MAX_SUBTITLE_CHARS: usize = 24_000;
 const MAX_OVERVIEW_CHARS: usize = 1_000;
 
+/// What the model answers when the file isn't any of the offered episodes.
+pub const NO_MATCH: &str = "NO MATCH";
+
 const SYSTEM_PROMPT: &str = "You identify which TV episode a subtitle excerpt comes from. \
 You are given the show's episode list with descriptions, a listing of the video files from the \
 same disc rip, and the subtitle text from the start of the current file. \
 The dialogue and events in the subtitles are the main evidence; match them against the episode \
-descriptions. Files from a disc rip are usually in episode order, so neighbouring files are \
-usually consecutive episodes: use the known matches of nearby files as a strong prior. \
+descriptions. Theme songs, opening titles and credits are the same in every episode, so they \
+tell you nothing: look past them to the story. The episode descriptions are short and often \
+leave out names and details, so match on the premise and the kind of story rather than \
+requiring names from the dialogue to appear in a description; an episode's title is often \
+echoed in its dialogue. \
+Files from a disc rip are usually, but not always, in episode order, so neighbouring files are \
+often consecutive episodes: use the known matches of nearby files as a prior, but let the \
+dialogue win. \
 Duplicates are fine: rips often contain several copies of the same episode, so a file may \
 legitimately match the same episode as another file, and that is not a reason to doubt it. \
 Some files are long and contain several or all of the episodes on the disc back to back; the \
 subtitles you are shown only cover the start of the file, so answer with the first episode in \
-it and mention in your reasoning if you suspect the file is combined. \
+it and mention in your analysis if you suspect the file is combined. \
 You are also told the length of the current file in minutes and, where known, each episode's \
-runtime. Use them as a hint, not proof, since runtimes are approximate: a file about the length \
-of one episode is probably a single episode, one far longer is probably combined, and one \
-much shorter is probably an extra or a recap. \
+runtime. Treat this as a weak hint only: listed runtimes are often broadcast slots including ad \
+breaks, so a file several minutes shorter than the listed runtime is normal. A file roughly \
+double the length of an episode or more is probably combined, and one far shorter than any \
+episode is probably an extra or a recap. Never let the length override what the dialogue says. \
+The file names in the rip listing only show the order. They may carry names from an earlier \
+run, which can be wrong, so never use them as evidence; the current file's name is withheld. \
 The subtitles are OCR output and may contain errors. Only choose from the listed episodes. \
 Not every file is an episode: discs also hold extras, featurettes, trailers, recaps, play-all \
 tracks and menus, and the subtitles may be empty or too short to tell. \"No match\" is an \
 acceptable and often correct answer. If the subtitles do not clearly correspond to one of the \
-listed episodes, set matched to false and use 0 for season and episode rather than guessing. \
-Give a short reasoning first, then whether it matched, the season, episode and your confidence.";
+listed episodes, answer NO MATCH rather than guessing. \
+Write your analysis first: note the distinctive names, places and events in the dialogue, \
+compare them with the episode descriptions, and say which candidate fits best and why. \
+Then give your answer: copy the label of that candidate exactly as it appears at the start of \
+its line (for example \"S02E01 - Title\"), or NO MATCH. Finally give your confidence.";
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct LlmMatch {
@@ -54,15 +69,18 @@ pub enum LlmVerdict {
 
 #[derive(Debug, Deserialize)]
 struct RawAnswer {
-    matched: bool,
     #[serde(default)]
-    season: u64,
-    #[serde(default)]
-    episode: u64,
+    analysis: String,
+    answer: String,
     #[serde(default)]
     confidence: String,
-    #[serde(default)]
-    reasoning: String,
+}
+
+/// How the model refers to an episode: the label that starts its line in the candidate list, and
+/// the only values its answer is allowed to take.
+pub fn episode_label(ep: &EpisodeEntry) -> String {
+    let name = ep.name.split_whitespace().collect::<Vec<_>>().join(" ");
+    format!("S{:02}E{:02} - {name}", ep.season_number, ep.episode_number)
 }
 
 fn position_of(all: &[EpisodeEntry], season: u64, episode: u64) -> Option<usize> {
@@ -114,10 +132,15 @@ pub fn build_prompt(
     let first = ctx.index.saturating_sub(NEIGHBOUR_FILES);
     let last = (ctx.index + NEIGHBOUR_FILES).min(ctx.rip.files.len().saturating_sub(1));
     for i in first..=last {
-        let name = ctx.rip.files[i]
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        // The current file's name is withheld: it may hold an earlier run's (possibly wrong) answer
+        let name = if i == ctx.index {
+            "(current file)".to_string()
+        } else {
+            ctx.rip.files[i]
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
         user.push_str(&format!("{}. {name}", i + 1));
         if let Some(Some(ep)) = ctx.rip.matches.get(i) {
             user.push_str(&format!(
@@ -143,10 +166,7 @@ pub fn build_prompt(
 
     user.push_str("\nCandidate episodes:\n");
     for ep in candidates {
-        user.push_str(&format!(
-            "S{:02}E{:02}",
-            ep.season_number, ep.episode_number
-        ));
+        user.push_str(&episode_label(ep));
         if let Some(aired) = &ep.aired {
             user.push_str(&format!(" | aired {aired}"));
         }
@@ -164,10 +184,16 @@ pub fn build_prompt(
             })
             .filter(|o| !o.is_empty())
             .unwrap_or_else(|| "(no description)".to_string());
-        user.push_str(&format!(" | \"{}\" | {overview}\n", ep.name));
+        user.push_str(&format!(" | {overview}\n"));
     }
 
-    let subtitles = subtitle_lines.join("\n");
+    // Caption positioning leaves indentation and blank lines that only cost tokens
+    let subtitles = subtitle_lines
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
     user.push_str("\nSubtitle text from the current file:\n\"\"\"\n");
     user.push_str(&truncate_chars(subtitles.trim(), MAX_SUBTITLE_CHARS));
     user.push_str("\n\"\"\"\n");
@@ -175,44 +201,63 @@ pub fn build_prompt(
     (SYSTEM_PROMPT.to_string(), user)
 }
 
-/// Reasoning comes first so the model works through the evidence before committing to an answer.
-pub fn response_schema() -> serde_json::Value {
+/// The model fills in object keys in the order they are serialised, and `serde_json` writes them
+/// alphabetically, so the key names are what put the analysis before the answer. Without that the
+/// model commits to an episode and a confidence before it has said anything, then rationalises.
+/// The answer is restricted to the offered labels, so it can't name anything else.
+pub fn response_schema(candidates: &[EpisodeEntry]) -> serde_json::Value {
+    let mut answers: Vec<String> = candidates.iter().map(episode_label).collect();
+    answers.push(NO_MATCH.to_string());
+
     serde_json::json!({
         "type": "object",
         "properties": {
-            "reasoning": { "type": "string" },
-            "matched": { "type": "boolean" },
-            "season": { "type": "integer" },
-            "episode": { "type": "integer" },
+            "analysis": { "type": "string" },
+            "answer": { "type": "string", "enum": answers },
             "confidence": { "type": "string", "enum": ["high", "medium", "low"] }
         },
-        "required": ["reasoning", "matched", "season", "episode", "confidence"]
+        "required": ["analysis", "answer", "confidence"]
     })
 }
 
-/// Parses the model's reply. `None` means it was unusable: malformed, or it claimed a match
-/// that isn't one of the episodes offered to it.
-pub fn parse_response(content: &str, candidates: &[EpisodeEntry]) -> Option<LlmVerdict> {
-    let raw: RawAnswer = serde_json::from_str(content).ok()?;
+/// Lowercased letters and digits only, so a quote or dash that differs between the model's answer
+/// and the episode's real name doesn't matter.
+fn normalize_label(label: &str) -> String {
+    label
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
 
-    if !raw.matched {
-        return Some(LlmVerdict::NoMatch {
-            reasoning: raw.reasoning,
+/// Parses the model's reply. `Err` carries why it was unusable: malformed, or an answer that isn't
+/// one of the episodes offered.
+pub fn parse_response(content: &str, candidates: &[EpisodeEntry]) -> Result<LlmVerdict, String> {
+    let raw: RawAnswer =
+        serde_json::from_str(content).map_err(|e| format!("the reply was not valid: {e}"))?;
+
+    if normalize_label(&raw.answer) == normalize_label(NO_MATCH) {
+        return Ok(LlmVerdict::NoMatch {
+            reasoning: raw.analysis,
         });
     }
 
-    let offered = candidates
+    let answer = normalize_label(&raw.answer);
+    let Some(candidate) = candidates
         .iter()
-        .any(|ep| ep.season_number == raw.season && ep.episode_number == raw.episode);
-    if !offered {
-        return None;
-    }
+        .find(|ep| normalize_label(&episode_label(ep)) == answer)
+    else {
+        return Err(format!(
+            "\"{}\" is not one of the episodes it was offered",
+            raw.answer
+        ));
+    };
 
-    Some(LlmVerdict::Match(LlmMatch {
-        season: raw.season,
-        episode: raw.episode,
+    Ok(LlmVerdict::Match(LlmMatch {
+        season: candidate.season_number,
+        episode: candidate.episode_number,
         confidence: raw.confidence,
-        reasoning: raw.reasoning,
+        reasoning: raw.analysis,
     }))
 }
 
@@ -264,6 +309,11 @@ mod tests {
         assert_eq!(select_candidates(&all, &ctx).len(), 48);
     }
 
+    /// (season, episode) at a position in `series(_, 24)`.
+    fn at(pos: usize) -> (u64, u64) {
+        ((pos / 24) as u64 + 1, (pos % 24) as u64 + 1)
+    }
+
     #[test]
     fn test_select_candidates_windows_around_expected_position() {
         let all = series(3, 24);
@@ -277,16 +327,17 @@ mod tests {
         };
 
         let got = numbers(&select_candidates(&all, &ctx));
-        assert_eq!(got.len(), 31);
-        assert_eq!(got[15], (2, 7)); // the expected position, centred
-        assert_eq!(got[0], (1, 16));
-        assert_eq!(*got.last().unwrap(), (2, 22));
+        assert_eq!(got.len(), 2 * LOCALITY_WINDOW + 1);
+        assert_eq!(got[LOCALITY_WINDOW], at(30)); // the expected position, centred
+        assert_eq!(got[0], at(30 - LOCALITY_WINDOW));
+        assert_eq!(*got.last().unwrap(), at(30 + LOCALITY_WINDOW));
     }
 
     #[test]
     fn test_select_candidates_clamps_to_ends() {
         let all = series(1, 40);
 
+        // Anchor at position 1, one file back: expected position 2.
         let mut near_start = rip(4);
         near_start.matches[0] = Some(episode(1, 2));
         let ctx = MatchContext {
@@ -296,8 +347,9 @@ mod tests {
         };
         let got = numbers(&select_candidates(&all, &ctx));
         assert_eq!(got.first(), Some(&(1, 1)));
-        assert_eq!(got.len(), 18); // expected position 2: 0..=17
+        assert_eq!(got.len(), 2 + LOCALITY_WINDOW + 1);
 
+        // Anchor at position 38, ten files back: expected position clamps to the last one, 39.
         let mut near_end = rip(30);
         near_end.matches[0] = Some(episode(1, 39));
         let ctx = MatchContext {
@@ -307,7 +359,8 @@ mod tests {
         };
         let got = numbers(&select_candidates(&all, &ctx));
         assert_eq!(got.last(), Some(&(1, 40)));
-        assert_eq!(got.first(), Some(&(1, 25))); // expected position clamps to 39: 24..=39
+        assert_eq!(got.first(), Some(&(1, 40 - LOCALITY_WINDOW as u64)));
+        assert_eq!(got.len(), LOCALITY_WINDOW + 1);
     }
 
     #[test]
@@ -336,8 +389,8 @@ mod tests {
         };
 
         let got = numbers(&select_candidates(&all, &ctx));
-        assert_eq!(got.len(), 31);
-        assert_eq!(got[15], (2, 7));
+        assert_eq!(got.len(), 2 * LOCALITY_WINDOW + 1);
+        assert_eq!(got[LOCALITY_WINDOW], at(30));
 
         // The first file is expected right at the hint.
         let ctx = MatchContext {
@@ -346,7 +399,7 @@ mod tests {
             show_name: "Show",
         };
         let got = numbers(&select_candidates(&all, &ctx));
-        assert_eq!(got[15], (2, 5));
+        assert_eq!(got[LOCALITY_WINDOW], (2, 5));
     }
 
     #[test]
@@ -361,7 +414,7 @@ mod tests {
         };
 
         let got = numbers(&select_candidates(&all, &ctx));
-        assert_eq!(got[15], (3, 11));
+        assert_eq!(got[LOCALITY_WINDOW], (3, 11));
     }
 
     #[test]
@@ -431,10 +484,14 @@ mod tests {
         let (system, user) = build_prompt(&[], &[with_runtime, without_runtime], &ctx, Some(92));
 
         assert!(user.contains("Length of the current file: 92 min."));
-        assert!(user.contains("S01E01 | aired 1993-09-10 | 45 min | \"Episode 1x1\""));
-        assert!(user.contains("S01E02 | \"Episode 1x2\""));
+        assert!(user.contains("S01E01 - Episode 1x1 | aired 1993-09-10 | 45 min | "));
+        assert!(user.contains("S01E02 - Episode 1x2 | Overview of 1x2"));
         assert!(system.contains("length of the current file in minutes"));
-        assert!(system.contains("far longer is probably combined"));
+        assert!(
+            system.contains("roughly double the length of an episode or more is probably combined")
+        );
+        // Listed runtimes are often broadcast slots, so a shorter file must not count against one.
+        assert!(system.contains("broadcast slots including ad breaks"));
     }
 
     #[test]
@@ -469,10 +526,13 @@ mod tests {
         assert!(user.contains("Show: The Show"));
         assert!(user.contains("current file is 2 of 3"));
         assert!(user.contains("1. title_00.mkv -> S01E01 \"Episode 1x1\""));
-        assert!(user.contains("2. title_01.mkv <- CURRENT"));
+        assert!(user.contains("2. (current file) <- CURRENT"));
+        // The current file's name may carry an earlier run's answer, so it's withheld.
+        assert!(!user.contains("title_01.mkv"));
+        assert!(system.contains("never use them as evidence"));
         assert!(!user.contains("3. title_02.mkv ->"));
-        assert!(user.contains("S01E02 | aired 1993-09-24 | \"Episode 1x2\" | Overview of 1x2"));
-        assert!(user.contains("S01E03 | \"Episode 1x3\" | (no description)"));
+        assert!(user.contains("S01E02 - Episode 1x2 | aired 1993-09-24 | Overview of 1x2"));
+        assert!(user.contains("S01E03 - Episode 1x3 | (no description)"));
         assert!(user.contains("Hello there.\nGeneral Kenobi."));
     }
 
@@ -510,17 +570,17 @@ mod tests {
         assert!(!user.contains("title_26.mkv"));
     }
 
+    fn reply(answer: &str) -> String {
+        format!(r#"{{"analysis":"Mentions a liver","answer":"{answer}","confidence":"high"}}"#)
+    }
+
     #[test]
     fn test_parse_response() {
         let candidates = vec![episode(1, 2), episode(1, 3)];
 
-        let ok = parse_response(
-            r#"{"reasoning":"Mentions a liver","matched":true,"season":1,"episode":3,"confidence":"high"}"#,
-            &candidates,
-        );
         assert_eq!(
-            ok,
-            Some(LlmVerdict::Match(LlmMatch {
+            parse_response(&reply("S01E03 - Episode 1x3"), &candidates),
+            Ok(LlmVerdict::Match(LlmMatch {
                 season: 1,
                 episode: 3,
                 confidence: "high".to_string(),
@@ -528,38 +588,106 @@ mod tests {
             }))
         );
 
-        assert!(parse_response("not json", &candidates).is_none());
-        assert!(parse_response(r#"{"season":1}"#, &candidates).is_none());
-        // Claims a match, but not with an episode we offered.
-        assert!(parse_response(
-            r#"{"reasoning":"","matched":true,"season":5,"episode":5,"confidence":"low"}"#,
-            &candidates
-        )
-        .is_none());
+        assert!(parse_response("not json", &candidates).is_err());
+        assert!(parse_response(r#"{"analysis":"x"}"#, &candidates).is_err());
+        // Not an episode we offered.
+        let err = parse_response(&reply("S05E05 - Episode 5x5"), &candidates).unwrap_err();
+        assert!(err.contains("S05E05"), "{err}");
+        // An old-style numeric answer is not a label.
+        assert!(parse_response(&reply("3"), &candidates).is_err());
+    }
+
+    #[test]
+    fn test_parse_response_answer_names_one_episode() {
+        let mut first = episode(2, 1);
+        first.name = "Nowhere to Hyde".to_string();
+        let mut second = episode(2, 2);
+        second.name = "Mystery Mask Mix-Up".to_string();
+        let candidates = vec![first, second];
+
+        // A title with the wrong number can't be expressed: the label is the whole answer.
+        assert!(parse_response(&reply("S02E02 - Nowhere to Hyde"), &candidates).is_err());
+        assert!(matches!(
+            parse_response(&reply("S02E01 - Nowhere to Hyde"), &candidates),
+            Ok(LlmVerdict::Match(LlmMatch {
+                season: 2,
+                episode: 1,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn test_parse_response_label_comparison_ignores_punctuation_and_case() {
+        let mut ep = episode(2, 2);
+        ep.name = "Mystery Mask Mix-Up".to_string();
+
+        // Includes the non-breaking hyphen a model once produced in place of "-".
+        for answer in [
+            "s02e02 - mystery mask mix-up",
+            "S02E02 - Mystery Mask Mix Up",
+            "S02E02 - Mystery Mask Mix\u{2011}Up",
+        ] {
+            assert!(
+                matches!(
+                    parse_response(&reply(answer), std::slice::from_ref(&ep)),
+                    Ok(LlmVerdict::Match(_))
+                ),
+                "{answer}"
+            );
+        }
     }
 
     #[test]
     fn test_parse_response_no_match() {
         let candidates = vec![episode(1, 2)];
 
-        // Season/episode are ignored when the model says there is no match, even if they
-        // happen to name an offered episode or are left out entirely.
-        for content in [
-            r#"{"reasoning":"Behind the scenes featurette","matched":false,"season":0,"episode":0,"confidence":"high"}"#,
-            r#"{"reasoning":"Behind the scenes featurette","matched":false,"season":1,"episode":2,"confidence":"low"}"#,
-            r#"{"reasoning":"Behind the scenes featurette","matched":false}"#,
-        ] {
+        for answer in ["NO MATCH", "no match", "No Match."] {
             assert_eq!(
-                parse_response(content, &candidates),
-                Some(LlmVerdict::NoMatch {
-                    reasoning: "Behind the scenes featurette".to_string()
-                })
+                parse_response(&reply(answer), &candidates),
+                Ok(LlmVerdict::NoMatch {
+                    reasoning: "Mentions a liver".to_string()
+                }),
+                "{answer}"
             );
         }
     }
 
     #[test]
-    fn test_prompt_and_schema_allow_no_match() {
+    fn test_episode_label() {
+        let mut ep = episode(2, 1);
+        ep.name = "  Nowhere   to\nHyde ".to_string();
+        assert_eq!(episode_label(&ep), "S02E01 - Nowhere to Hyde");
+    }
+
+    #[test]
+    fn test_schema_restricts_answer_to_offered_labels() {
+        let schema = response_schema(&[episode(1, 2), episode(1, 3)]);
+        assert_eq!(
+            schema["properties"]["answer"]["enum"],
+            serde_json::json!(["S01E02 - Episode 1x2", "S01E03 - Episode 1x3", "NO MATCH"])
+        );
+        let required = schema["required"].as_array().unwrap();
+        for key in ["analysis", "answer", "confidence"] {
+            assert!(required.contains(&serde_json::json!(key)), "{key}");
+        }
+    }
+
+    /// The model fills keys in serialised order, and serde_json writes them alphabetically, so the
+    /// key names must sort with the analysis first. If this fails the model answers before it
+    /// reasons, which is how it ended up naming one episode in its analysis and another as its
+    /// answer.
+    #[test]
+    fn test_schema_serialises_analysis_before_answer_before_confidence() {
+        let json = serde_json::to_string(&response_schema(&[episode(1, 1)])).unwrap();
+        let properties = &json[json.find("\"properties\"").unwrap()..];
+        let at = |key: &str| properties.find(&format!("\"{key}\":")).unwrap();
+        assert!(at("analysis") < at("answer"));
+        assert!(at("answer") < at("confidence"));
+    }
+
+    #[test]
+    fn test_prompt_allows_no_match() {
         let rip = rip(1);
         let ctx = MatchContext {
             rip: &rip,
@@ -568,13 +696,24 @@ mod tests {
         };
         let (system, _) = build_prompt(&[], &[episode(1, 1)], &ctx, None);
         assert!(system.contains("\"No match\" is an acceptable"));
-        assert!(system.contains("matched to false"));
+        assert!(system.contains("answer NO MATCH rather than guessing"));
+        assert!(system.contains("Theme songs, opening titles and credits are the same"));
+    }
 
-        let schema = response_schema();
-        assert_eq!(schema["properties"]["matched"]["type"], "boolean");
-        assert!(schema["required"]
-            .as_array()
-            .unwrap()
-            .contains(&serde_json::json!("matched")));
+    #[test]
+    fn test_build_prompt_normalises_subtitle_whitespace() {
+        let rip = rip(1);
+        let ctx = MatchContext {
+            rip: &rip,
+            index: 0,
+            show_name: "Show",
+        };
+        let lines = vec![
+            "    WHAT'S THAT?   ".to_string(),
+            String::new(),
+            "        THE GHOST!".to_string(),
+        ];
+        let (_, user) = build_prompt(&lines, &[episode(1, 1)], &ctx, None);
+        assert!(user.contains("\"\"\"\nWHAT'S THAT?\nTHE GHOST!\n\"\"\""));
     }
 }

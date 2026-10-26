@@ -11,6 +11,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 pub struct OllamaClient {
     config: OllamaConfig,
     client: reqwest::blocking::Client,
+    /// Print each prompt and raw reply to stderr (EPISODE_MATCHER_OLLAMA_DEBUG).
+    debug: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -30,11 +32,20 @@ impl OllamaClient {
         let client = reqwest::blocking::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .build()?;
-        Ok(Self { config, client })
+        let debug = std::env::var_os("EPISODE_MATCHER_OLLAMA_DEBUG").is_some_and(|v| !v.is_empty());
+        Ok(Self {
+            config,
+            client,
+            debug,
+        })
     }
 
     /// Sends a chat request constrained to `schema` and returns the raw JSON text of the reply.
     pub fn chat_json(&self, system: &str, user: &str, schema: serde_json::Value) -> Result<String> {
+        if self.debug {
+            eprintln!("--- Ollama system prompt ---\n{system}\n--- Ollama user prompt ---\n{user}");
+        }
+
         let body = serde_json::json!({
             "model": self.config.model,
             "stream": false,
@@ -73,6 +84,10 @@ impl OllamaClient {
                  truncated. Raise EPISODE_MATCHER_OLLAMA_NUM_CTX or use --hint to offer fewer episodes.",
                 self.config.num_ctx
             );
+        }
+
+        if self.debug {
+            eprintln!("--- Ollama reply ---\n{}\n---", chat.message.content);
         }
 
         Ok(chat.message.content)

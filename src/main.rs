@@ -84,6 +84,11 @@ fn run(cli: Cli) -> Result<()> {
     }
     if needs_preload {
         preload_cache(&mut client, &show_id, &mut cache)?;
+        // Persist right away: the preload is slow, and bailing or being interrupted later in the
+        // run would otherwise throw it away and force a refetch next time.
+        if let Err(e) = cache.save() {
+            eprintln!("Warning: Failed to save cache: {e}");
+        }
     } else {
         println!("Using cached episode data for series {show_id}");
     }

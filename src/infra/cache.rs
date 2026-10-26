@@ -20,10 +20,18 @@ impl Cache {
     pub fn load() -> Self {
         let cache_path = get_cache_path();
         if cache_path.exists() {
-            if let Ok(content) = fs::read_to_string(&cache_path) {
-                if let Ok(cache) = serde_json::from_str(&content) {
-                    return cache;
-                }
+            match fs::read_to_string(&cache_path) {
+                Ok(content) => match serde_json::from_str(&content) {
+                    Ok(cache) => return cache,
+                    Err(e) => eprintln!(
+                        "Warning: Ignoring unreadable cache {}: {e}",
+                        cache_path.display()
+                    ),
+                },
+                Err(e) => eprintln!(
+                    "Warning: Failed to read cache {}: {e}",
+                    cache_path.display()
+                ),
             }
         }
         Cache::default()

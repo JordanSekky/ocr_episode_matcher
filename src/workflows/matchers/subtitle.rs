@@ -85,8 +85,14 @@ impl Matcher for SubtitleMatcher {
                     }
                     return confirm_suggestion(None, &lines, series_id, cache);
                 }
-                Ok(Suggestion::Unusable) => {
-                    eprintln!("Ollama did not return a usable match, falling back to manual entry.")
+                Ok(Suggestion::Unusable(reason)) => {
+                    eprintln!("Ollama's answer was rejected: {reason}.");
+
+                    // Never guess or block a batch run; the caller warns and skips the file.
+                    if self.skip_confirm {
+                        return Ok(None);
+                    }
+                    eprintln!("Falling back to manual entry.");
                 }
                 Err(e) => eprintln!("Ollama matching failed ({e}), falling back to manual entry."),
             }
@@ -122,8 +128,8 @@ enum Suggestion {
     NoMatch {
         reasoning: String,
     },
-    /// The model answered, but not in a way we can use.
-    Unusable,
+    /// The model answered, but not in a way we can trust, with the reason why.
+    Unusable(String),
 }
 
 /// Asks the model which cached episode the subtitles belong to, if any.
@@ -147,17 +153,17 @@ fn suggest_episode(
     );
 
     let (system, user) = llm::build_prompt(lines, &candidates, ctx, file_minutes);
-    let content = client.chat_json(&system, &user, llm::response_schema())?;
+    let content = client.chat_json(&system, &user, llm::response_schema(&candidates))?;
 
     Ok(match llm::parse_response(&content, &candidates) {
-        Some(llm::LlmVerdict::Match(suggestion)) => {
+        Ok(llm::LlmVerdict::Match(suggestion)) => {
             match lookup_episode(cache, series_id, suggestion.season, suggestion.episode) {
                 Some(episode) => Suggestion::Episode(episode, suggestion),
-                None => Suggestion::Unusable,
+                None => Suggestion::Unusable("the episode is not in the cache".to_string()),
             }
         }
-        Some(llm::LlmVerdict::NoMatch { reasoning }) => Suggestion::NoMatch { reasoning },
-        None => Suggestion::Unusable,
+        Ok(llm::LlmVerdict::NoMatch { reasoning }) => Suggestion::NoMatch { reasoning },
+        Err(reason) => Suggestion::Unusable(reason),
     })
 }
 
