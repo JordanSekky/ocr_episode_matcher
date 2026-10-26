@@ -75,19 +75,21 @@ pub fn confirm_rename(old_path: &Path, new_path: &Path) -> bool {
     }
 }
 
-pub fn rename_file(old_path: &Path, new_path: &Path, skip_confirm: bool) -> Result<()> {
+/// Returns whether the file now carries the new name: true if it was renamed or already named
+/// correctly, false if the user skipped it.
+pub fn rename_file(old_path: &Path, new_path: &Path, skip_confirm: bool) -> Result<bool> {
     if old_path.to_string_lossy() == new_path.to_string_lossy() {
         println!("File is already named correctly.");
-        return Ok(());
+        return Ok(true);
     }
     if !skip_confirm && !confirm_rename(old_path, new_path) {
         println!("Skipped.");
-        return Ok(());
+        return Ok(false);
     }
 
     fs::rename(old_path, new_path)?;
     println!("Renamed successfully.");
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]

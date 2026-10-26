@@ -64,6 +64,9 @@ struct ExtendedEpisodeData {
     #[serde(rename = "number")]
     pub episode_number: u32,
     pub name: String,
+    pub overview: Option<String>,
+    pub aired: Option<String>,
+    pub runtime: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -222,12 +225,16 @@ impl TvdbClient {
                         season_number: extended_resp.data.season_number as u64,
                         episode_number: extended_resp.data.episode_number as u64,
                         name: extended_resp.data.name,
+                        overview: extended_resp.data.overview,
+                        aired: extended_resp.data.aired,
+                        runtime: extended_resp.data.runtime,
                     };
                     cache.set_episode(series_id, &entry);
                 }
             }
         }
 
+        cache.mark_series_detailed(series_id);
         Ok(())
     }
 }

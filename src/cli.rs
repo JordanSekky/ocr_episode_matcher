@@ -1,6 +1,9 @@
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
+use crate::domain::models::parse_sxxexx;
+use crate::media::subtitles::SubtitleCodec;
+
 #[derive(Debug, Clone, ValueEnum, PartialEq, Eq)]
 pub enum MatchMode {
     ProductionCode,
@@ -42,4 +45,18 @@ pub struct Cli {
     /// Maximum duration (in seconds) to extract subtitles for
     #[arg(long = "subtitle-duration", default_value_t = 300)]
     pub subtitle_duration: u64,
+
+    /// Subtitle codec to use when a file has several English tracks (falls back to the others
+    /// if it has none of this codec)
+    #[arg(long = "prefer-codec", value_enum, default_value = "subrip")]
+    pub prefer_codec: SubtitleCodec,
+
+    /// Roughly where the first file of each input directory sits in the series (e.g. S03E01).
+    /// Narrows the episodes offered to Ollama until an earlier file has been matched.
+    #[arg(long, value_name = "SXXEXX", value_parser = parse_hint)]
+    pub hint: Option<(u64, u64)>,
+}
+
+fn parse_hint(input: &str) -> Result<(u64, u64), String> {
+    parse_sxxexx(input).map_err(|_| format!("'{input}' is not a valid SXXEXX code (e.g. S03E01)"))
 }

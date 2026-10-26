@@ -16,7 +16,7 @@ This software is currently **work in progress** and has only been tested and con
 - **Batch Processing**: Process entire directories of MKV files
 - **Caching**: Caches TVDB data locally to avoid repeated API calls
 - **Interactive Mode**: Prompts for confirmation before renaming (can be skipped with `--no-confirm`)
-- **Subtitle Mode**: View embedded subtitles (SRT/PGS) to manually identify episodes
+- **Subtitle Mode**: View embedded subtitles (SRT/PGS) to manually identify episodes, optionally with episode suggestions from a local Ollama model
 
 ## Requirements
 
@@ -56,6 +56,18 @@ Create `~/.episode-matcher/config.toml`:
 tvdb_api_key = "your-api-key-here"
 ```
 
+### Ollama (optional, subtitle mode only)
+
+Subtitle mode can ask an [Ollama](https://ollama.com) model to match each file's subtitles against TheTVDB episode descriptions. It is enabled by environment variables:
+
+```bash
+export EPISODE_MATCHER_OLLAMA_URL="http://localhost:11434"   # enables the feature
+export EPISODE_MATCHER_OLLAMA_MODEL="your-model"              # required when the URL is set
+export EPISODE_MATCHER_OLLAMA_NUM_CTX="32768"                 # optional, defaults to 32768
+```
+
+Without `EPISODE_MATCHER_OLLAMA_URL`, subtitle mode behaves exactly as before.
+
 ## Usage
 
 ### Basic Usage
@@ -84,6 +96,9 @@ episode-matcher "/path/to/dir1" "/path/to/dir2" "/path/to/file.mkv" --show-id 77
 - `--match-mode <mode>` - Matching strategy: `prod-code` (default) or `subtitles`
 - `--no-confirm` - Skip confirmation prompts (useful for batch processing)
 - `--prompt-size <bytes>` - For files larger than this size, prompt for production code manually if OCR fails (only for `prod-code` mode)
+- `--subtitle-duration <seconds>` - How much of each file's subtitles to extract (only for `subtitles` mode, default 300)
+- `--prefer-codec <codec>` - Which English subtitle track to read when a file has several: `subrip` (default), `dvdsub` or `pgs`. Falls back to the other codecs if the file has none of the preferred one (only for `subtitles` mode)
+- `--hint <SxxExx>` - Roughly where the first file of each input directory sits in the series, e.g. `S03E01` (only used with Ollama; see below)
 
 ### Examples
 
@@ -101,7 +116,34 @@ episode-matcher "/path/to/videos" --show-id 77398 --no-confirm
 ```bash
 episode-matcher "/path/to/videos" --show-id 77398 --match-mode subtitles
 ```
-This will extract English subtitles (SRT or PGS) and display them to you. You then manually enter the Season/Episode (e.g., S01E01). For PGS subtitles, it uses OCR to convert the image-based subs to text.
+This will extract English subtitles (SRT, PGS or DVD) and display them to you. You then manually enter the Season/Episode (e.g., S01E01). For PGS and DVD subtitles, it uses OCR to convert the image-based subs to text.
+
+DVD rips made with MakeMKV often carry both the DVD's image subtitles (`dvdsub`) and a text `subrip` track holding the disc's closed captions. Closed captions are in capitals, include sound cues and song lyrics, and can contain typos, so the image subtitles are sometimes the better source. Use `--prefer-codec dvdsub` to read those instead of the default `subrip`.
+
+**Using Subtitle Matching Mode with Ollama:**
+```bash
+EPISODE_MATCHER_OLLAMA_URL=http://localhost:11434 EPISODE_MATCHER_OLLAMA_MODEL=your-model \
+  episode-matcher "/path/to/disc" --show-id 77398 --match-mode subtitles
+```
+For each file, the model is shown the subtitle text, the episode descriptions and runtimes, and the length of the file in minutes (a file about one episode long is probably a single episode, a much longer one is probably several combined, a much shorter one is probably an extra), and suggests an episode with its reasoning. At the prompt:
+
+- press Enter to accept the suggestion
+- type an episode (e.g. `S01E05`) to override it
+- type `v` to view the subtitles in your pager first
+
+Duplicates are fine: rips often contain several copies of the same episode, and some files are long ones with several or all of the disc's episodes back to back. The model is told this, and for a combined file it answers with the first episode, since only the start of the subtitles is read.
+
+Not every file is an episode (extras, recaps and play-all tracks are common on discs), so the model may answer "no match". In that case Enter skips the file, and you can still type an episode to assign one by hand. With `--no-confirm`, suggestions are accepted automatically and no-match files are skipped. If Ollama can't be reached or gives an unusable answer, it falls back to the manual flow above.
+
+**Rip locality:** files on a disc are usually in episode order, so files that sort next to each other tend to be neighbouring episodes. Within a single run, the prompt includes the neighbouring filenames and what they were matched to, and once an earlier file has been matched, only episodes within about 15 of where the current file is expected to be are offered to the model. Process a whole disc directory in one run to benefit from this. Files you skip, or decline to rename, don't count as hints.
+
+**Big series:** until the first file is matched there is nothing to narrow the list, so the whole series is sent. Pass `--hint` to start narrowed:
+```bash
+episode-matcher "/path/to/disc" --show-id 77398 --match-mode subtitles --hint S03E01
+```
+The first file in each input directory is expected near S03E01, the next one episode later, and so on, with the same ±15 window. Once a file has actually been matched, that match takes over from the hint. Because the hint applies to every input directory, run discs from different parts of the series separately.
+
+The first Ollama run for a show re-downloads its episode data once, to fetch episode descriptions and runtimes. Long series produce long prompts, so use a model with a large context window and raise `EPISODE_MATCHER_OLLAMA_NUM_CTX` if needed. Ollama silently drops the start of a prompt that doesn't fit, so the tool warns when a prompt filled the whole window.
 
 **Process multiple directories:**
 ```bash
@@ -145,7 +187,7 @@ The tool caches TVDB data locally at `~/.episode-matcher/cache.json` to:
 
 The cache stores:
 - Series names (mapped by series ID)
-- Episode information (mapped by production code)
+- Episode information (mapped by production code and by season/episode), including descriptions, air dates and runtimes
 
 ## Limitations
 

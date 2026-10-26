@@ -1,3 +1,3 @@
-pub mod tvdb;
 pub mod cache;
-
+pub mod ollama;
+pub mod tvdb;
