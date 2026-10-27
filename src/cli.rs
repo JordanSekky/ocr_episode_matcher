@@ -1,7 +1,6 @@
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
-use crate::domain::models::parse_sxxexx;
 use crate::media::subtitles::SubtitleCodec;
 
 #[derive(Debug, Clone, ValueEnum, PartialEq, Eq)]
@@ -30,6 +29,11 @@ pub struct Cli {
     #[arg(long)]
     pub no_confirm: bool,
 
+    /// Don't ask to confirm a Jev suggestion when the file already has that episode's name;
+    /// move straight on to the next file
+    #[arg(long)]
+    pub accept_unchanged: bool,
+
     /// Recursively scan directories for MKV files
     #[arg(short = 'r', long = "recursive")]
     pub recursive: bool,
@@ -55,17 +59,13 @@ pub struct Cli {
     #[arg(long = "prefer-codec", value_enum, default_value = "subrip")]
     pub prefer_codec: SubtitleCodec,
 
-    /// Also offer specials (season 0) to Ollama. They are left out by default because they are
+    /// Also offer specials (season 0) to Jev. They are left out by default because they are
     /// mostly extras and short webisodes; they can still be entered by hand.
     #[arg(long)]
     pub include_specials: bool,
 
-    /// Roughly where the first file of each input directory sits in the series (e.g. S03E01).
-    /// Narrows the episodes offered to Ollama until an earlier file has been matched.
-    #[arg(long, value_name = "SXXEXX", value_parser = parse_hint)]
-    pub hint: Option<(u64, u64)>,
-}
-
-fn parse_hint(input: &str) -> Result<(u64, u64), String> {
-    parse_sxxexx(input).map_err(|_| format!("'{input}' is not a valid SXXEXX code (e.g. S03E01)"))
+    /// Only offer Jev episodes from this season (e.g. 3). Without it the whole series is
+    /// offered.
+    #[arg(long, value_name = "N")]
+    pub season: Option<u64>,
 }

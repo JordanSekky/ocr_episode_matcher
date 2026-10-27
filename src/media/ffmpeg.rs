@@ -27,42 +27,6 @@ pub fn get_streams_json(path: &Path) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
-/// Length of the file in whole minutes, rounded to the nearest.
-pub fn get_duration_minutes(path: &Path) -> Result<u64> {
-    let output = Command::new("ffprobe")
-        .args([
-            "-v",
-            "quiet",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "csv=p=0",
-            path.to_str().context("Invalid path")?,
-        ])
-        .output()
-        .context("Failed to run ffprobe")?;
-
-    if !output.status.success() {
-        bail!(
-            "ffprobe failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    parse_duration_minutes(&String::from_utf8_lossy(&output.stdout))
-}
-
-fn parse_duration_minutes(ffprobe_output: &str) -> Result<u64> {
-    let seconds: f64 = ffprobe_output
-        .trim()
-        .parse()
-        .with_context(|| format!("Unexpected ffprobe duration: {:?}", ffprobe_output.trim()))?;
-    if !seconds.is_finite() || seconds < 0.0 {
-        bail!("Unexpected ffprobe duration: {seconds}");
-    }
-    Ok((seconds / 60.0).round() as u64)
-}
-
 pub fn extract_subtitle_track(
     input_path: &Path,
     track_index: u32,
@@ -184,26 +148,4 @@ pub fn extract_frames(input_path: &str, output_pattern: &str) -> Result<()> {
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_duration_minutes() {
-        assert_eq!(parse_duration_minutes("2640.512000\n").unwrap(), 44);
-        assert_eq!(parse_duration_minutes("2669.9").unwrap(), 44);
-        assert_eq!(parse_duration_minutes("2670").unwrap(), 45);
-        assert_eq!(parse_duration_minutes("29.9").unwrap(), 0);
-        assert_eq!(parse_duration_minutes("9000").unwrap(), 150);
-    }
-
-    #[test]
-    fn test_parse_duration_minutes_invalid() {
-        assert!(parse_duration_minutes("").is_err());
-        assert!(parse_duration_minutes("N/A").is_err());
-        assert!(parse_duration_minutes("-5").is_err());
-        assert!(parse_duration_minutes("inf").is_err());
-    }
 }

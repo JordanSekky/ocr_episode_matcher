@@ -16,7 +16,7 @@ This software is currently **work in progress** and has only been tested and con
 - **Batch Processing**: Process entire directories of MKV files
 - **Caching**: Caches TVDB data locally to avoid repeated API calls
 - **Interactive Mode**: Prompts for confirmation before renaming (can be skipped with `--no-confirm`)
-- **Subtitle Mode**: View embedded subtitles (SRT/PGS) to manually identify episodes, optionally with episode suggestions from a local Ollama model
+- **Subtitle Mode**: View embedded subtitles (SRT/PGS) to manually identify episodes, optionally with episode suggestions from TypeSafe's Jev classifier
 
 ## Requirements
 
@@ -56,17 +56,17 @@ Create `~/.episode-matcher/config.toml`:
 tvdb_api_key = "your-api-key-here"
 ```
 
-### Ollama (optional, subtitle mode only)
+### Jev (optional, subtitle mode only)
 
-Subtitle mode can ask an [Ollama](https://ollama.com) model to match each file's subtitles against TheTVDB episode descriptions. It is enabled by environment variables:
+Subtitle mode can ask [TypeSafe's Jev](https://typesafe.ai), a classifier that picks one option from a fixed list, which TheTVDB episode a file's subtitles belong to. It is enabled by an API key, from the environment or the config file:
 
 ```bash
-export EPISODE_MATCHER_OLLAMA_URL="http://localhost:11434"   # enables the feature
-export EPISODE_MATCHER_OLLAMA_MODEL="your-model"              # required when the URL is set
-export EPISODE_MATCHER_OLLAMA_NUM_CTX="32768"                 # optional, defaults to 32768
+export JEV_API_KEY="your-key"                     # or jev_api_key = "your-key" in config.toml
+export EPISODE_MATCHER_JEV_MODEL="jev-latest"     # optional, defaults to jev-latest
+export EPISODE_MATCHER_JEV_URL="https://..."      # optional, e.g. to go through a gateway
 ```
 
-Without `EPISODE_MATCHER_OLLAMA_URL`, subtitle mode behaves exactly as before.
+Without a key, subtitle mode behaves exactly as before. Set `EPISODE_MATCHER_JEV_DEBUG=1` to print each request and reply.
 
 ## Usage
 
@@ -95,12 +95,13 @@ episode-matcher "/path/to/dir1" "/path/to/dir2" "/path/to/file.mkv" --show-id 77
 - `--show-id <id>` - Direct TheTVDB show ID (faster, no search needed)
 - `--match-mode <mode>` - Matching strategy: `prod-code` (default) or `subtitles`
 - `--no-confirm` - Skip confirmation prompts (useful for batch processing)
+- `--accept-unchanged` - Don't ask to confirm a Jev suggestion when the file already has that episode's name, e.g. when re-checking a folder that was matched before (only for `subtitles` mode)
 - `--prompt-size <bytes>` - For files larger than this size, prompt for production code manually if OCR fails (only for `prod-code` mode)
 - `--subtitle-start <seconds>` - How far into each file to start reading subtitles, e.g. to skip a "previously on" recap (only for `subtitles` mode, default 0)
 - `--subtitle-duration <seconds>` - How much of each file's subtitles to extract (only for `subtitles` mode, default 300)
 - `--prefer-codec <codec>` - Which English subtitle track to read when a file has several: `subrip` (default), `dvdsub` or `pgs`. Falls back to the other codecs if the file has none of the preferred one (only for `subtitles` mode)
-- `--include-specials` - Also offer specials (season 0) to Ollama, which leaves them out by default (only used with Ollama)
-- `--hint <SxxExx>` - Roughly where the first file of each input directory sits in the series, e.g. `S03E01` (only used with Ollama; see below)
+- `--include-specials` - Also offer specials (season 0) to Jev, which leaves them out by default (only used with Jev)
+- `--season <N>` - Only offer Jev episodes from this season, e.g. `3` (only used with Jev; see below)
 
 ### Examples
 
@@ -122,12 +123,11 @@ This will extract English subtitles (SRT, PGS or DVD) and display them to you. Y
 
 DVD rips made with MakeMKV often carry both the DVD's image subtitles (`dvdsub`) and a text `subrip` track holding the disc's closed captions. Closed captions are in capitals, include sound cues and song lyrics, and can contain typos, so the image subtitles are sometimes the better source. Use `--prefer-codec dvdsub` to read those instead of the default `subrip`.
 
-**Using Subtitle Matching Mode with Ollama:**
+**Using Subtitle Matching Mode with Jev:**
 ```bash
-EPISODE_MATCHER_OLLAMA_URL=http://localhost:11434 EPISODE_MATCHER_OLLAMA_MODEL=your-model \
-  episode-matcher "/path/to/disc" --show-id 77398 --match-mode subtitles
+JEV_API_KEY=your-key episode-matcher "/path/to/disc" --show-id 77398 --match-mode subtitles
 ```
-For each file, the model is shown the subtitle text, the episode descriptions and runtimes, and the length of the file in minutes (a weak hint only: TVDB runtimes are often broadcast slots including ads, so files are usually a few minutes shorter; roughly double the length or more suggests a combined file), and suggests an episode with its reasoning. The current file's name is withheld from the prompt, since it may carry an earlier run's (possibly wrong) answer. At the prompt:
+For each file, Jev is given the subtitle text and a multiple-choice question whose options are the episodes, each described by its TVDB summary, plus "no match". It answers with the episode it rates most likely and a probability for every option. The tool prints the pick with its probability, the next most likely episodes, and the suggested episode's TVDB summary so you can check it. Each file is judged on its own: nothing about other files, their names or what they were matched to is sent. At the prompt:
 
 - press Enter to accept the suggestion
 - type an episode (e.g. `S01E05`) to override it
@@ -135,28 +135,22 @@ For each file, the model is shown the subtitle text, the episode descriptions an
 
 Accepting or overriding here is the confirmation, so the file is renamed without a second prompt.
 
-Duplicates happen: rips can hold several copies of the same episode, and some files are long ones with several or all of the disc's episodes back to back. The model is told this, and for a combined file it answers with the first episode, since only the start of the subtitles is read. It is also told that a run of neighbouring files matched to one episode is more likely a repeated mistake than a run of copies.
+Specials (season 0) are left out of the episodes offered to Jev, because they are mostly extras and short webisodes that crowd out the real episodes. Pass `--include-specials` to offer them too; you can always type one in by hand.
 
-Specials (season 0) are left out of the episodes offered to the model, because they are mostly extras and short webisodes that crowd out the real episodes. Pass `--include-specials` to offer them too; you can always type one in by hand.
-
-**Recaps:** many shows open each episode with a "previously on" recap of clips from earlier episodes, which can lead the model to match every file to the episodes being recapped (often the pilot). Skip it with `--subtitle-start`, and consider reading a longer stretch so there is enough of the episode itself to go on:
+**Recaps:** many shows open each episode with a "previously on" recap of clips from earlier episodes, which can pull the match towards the episodes being recapped. Skip it with `--subtitle-start`, and read a long enough stretch for the episode itself to show:
 ```bash
-episode-matcher "/path/to/disc" --show-id 83237 --match-mode subtitles --subtitle-start 150 --subtitle-duration 600
+episode-matcher "/path/to/disc" --show-id 83237 --match-mode subtitles --subtitle-start 150 --subtitle-duration 1350
 ```
 
-Not every file is an episode (extras, recaps and play-all tracks are common on discs), so the model may answer "no match". In that case Enter skips the file, and you can still type an episode to assign one by hand. With `--no-confirm`, suggestions are accepted automatically and no-match files are skipped.
+Not every file is an episode (extras, recaps and play-all tracks are common on discs), so Jev may answer "no match". In that case Enter skips the file, and you can still type an episode to assign one by hand. With `--no-confirm`, suggestions are accepted automatically and no-match files are skipped. An answer that can't be used prints the reason and, with `--no-confirm`, skips the file; otherwise it falls back to the manual flow above, as does an unreachable Jev.
 
-The model must also give the episode's title, and the answer is rejected if the title doesn't belong to the season and episode it names, so a reply that contradicts itself is never accepted. A rejected answer prints the reason and, with `--no-confirm`, skips the file; otherwise it falls back to the manual flow above, as does an unreachable Ollama.
-
-**Rip locality:** files on a disc are usually in episode order, so files that sort next to each other tend to be neighbouring episodes. Within a single run, the prompt includes the neighbouring filenames and what they were matched to, and once an earlier file has been matched, only episodes within about 7 of where the current file is expected to be are offered to the model. Process a whole disc directory in one run to benefit from this. Files you skip, or decline to rename, don't count as hints.
-
-**Big series:** until the first file is matched there is nothing to narrow the list, so the whole series is sent. Pass `--hint` to start narrowed:
+**Big series:** the whole series is offered to Jev unless you name a season:
 ```bash
-episode-matcher "/path/to/disc" --show-id 77398 --match-mode subtitles --hint S03E01
+episode-matcher "/path/to/disc" --show-id 77398 --match-mode subtitles --season 3
 ```
-The first file in each input directory is expected near S03E01, the next one episode later, and so on, with the same ±7 window. Once a file has actually been matched, that match takes over from the hint. Because the hint applies to every input directory, run discs from different parts of the series separately.
+The season applies to every input directory, so run discs from different seasons separately. There is no narrowing by position on the disc: disc titles are often not in episode order. Jev limits how long a request can be, so a long series may need `--season`; a request that is too long fails with a message saying so.
 
-The first Ollama run for a show re-downloads its episode data once, to fetch episode descriptions and runtimes. Long series produce long prompts, so use a model with a large context window and raise `EPISODE_MATCHER_OLLAMA_NUM_CTX` if needed. Ollama silently drops the start of a prompt that doesn't fit, so the tool warns when a prompt filled the whole window.
+The first Jev run for a show re-downloads its episode data once, to fetch episode descriptions.
 
 **Process multiple directories:**
 ```bash

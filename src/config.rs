@@ -8,6 +8,15 @@ use std::path::PathBuf;
 #[derive(Debug, Deserialize)]
 struct ConfigFile {
     tvdb_api_key: Option<String>,
+    jev_api_key: Option<String>,
+}
+
+fn read_config_file() -> Result<Option<ConfigFile>> {
+    let config_path = get_config_path();
+    if !config_path.exists() {
+        return Ok(None);
+    }
+    Ok(Some(toml::from_str(&fs::read_to_string(&config_path)?)?))
 }
 
 pub fn get_tvdb_api_key() -> Result<String> {
@@ -17,61 +26,49 @@ pub fn get_tvdb_api_key() -> Result<String> {
     }
 
     // Then, check config file
-    let config_path = get_config_path();
-    if config_path.exists() {
-        let config_content = fs::read_to_string(&config_path)?;
-        let config: ConfigFile = toml::from_str(&config_content)?;
-        if let Some(key) = config.tvdb_api_key {
-            return Ok(key);
-        }
+    if let Some(key) = read_config_file()?.and_then(|c| c.tvdb_api_key) {
+        return Ok(key);
     }
 
     bail!("TVDB API key not found. Set TVDB_API_KEY environment variable or create config file at $HOME/.episode-matcher/config.toml with tvdb_api_key = \"your-key\"")
 }
 
-const DEFAULT_OLLAMA_NUM_CTX: u32 = 32768;
+pub const DEFAULT_JEV_URL: &str = "https://api.typesafe.ai";
+const DEFAULT_JEV_MODEL: &str = "jev-latest";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OllamaConfig {
+pub struct JevConfig {
     pub url: String,
+    pub api_key: String,
     pub model: String,
-    pub num_ctx: u32,
 }
 
-/// Ollama is opt-in: `EPISODE_MATCHER_OLLAMA_URL` enables it, and the model is then required.
-pub fn get_ollama_config() -> Result<Option<OllamaConfig>> {
-    ollama_config_from(
-        env::var("EPISODE_MATCHER_OLLAMA_URL").ok(),
-        env::var("EPISODE_MATCHER_OLLAMA_MODEL").ok(),
-        env::var("EPISODE_MATCHER_OLLAMA_NUM_CTX").ok(),
-    )
+/// Jev is opt-in: a key in `JEV_API_KEY` or the config file's `jev_api_key` enables it.
+pub fn get_jev_config() -> Result<Option<JevConfig>> {
+    Ok(jev_config_from(
+        env::var("JEV_API_KEY").ok(),
+        read_config_file()?.and_then(|c| c.jev_api_key),
+        env::var("EPISODE_MATCHER_JEV_MODEL").ok(),
+        env::var("EPISODE_MATCHER_JEV_URL").ok(),
+    ))
 }
 
-fn ollama_config_from(
-    url: Option<String>,
+fn jev_config_from(
+    env_key: Option<String>,
+    file_key: Option<String>,
     model: Option<String>,
-    num_ctx: Option<String>,
-) -> Result<Option<OllamaConfig>> {
-    let Some(url) = url.filter(|u| !u.trim().is_empty()) else {
-        return Ok(None);
-    };
-    let Some(model) = model.filter(|m| !m.trim().is_empty()) else {
-        bail!("EPISODE_MATCHER_OLLAMA_URL is set but EPISODE_MATCHER_OLLAMA_MODEL is not");
-    };
-    let num_ctx = match num_ctx {
-        Some(value) => value.trim().parse().map_err(|_| {
-            anyhow::anyhow!(
-                "EPISODE_MATCHER_OLLAMA_NUM_CTX must be a positive integer, got '{value}'"
-            )
-        })?,
-        None => DEFAULT_OLLAMA_NUM_CTX,
-    };
-
-    Ok(Some(OllamaConfig {
-        url: url.trim().trim_end_matches('/').to_string(),
-        model: model.trim().to_string(),
-        num_ctx,
-    }))
+    url: Option<String>,
+) -> Option<JevConfig> {
+    let non_empty = |v: Option<String>| v.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    let api_key = non_empty(env_key).or_else(|| non_empty(file_key))?;
+    Some(JevConfig {
+        url: non_empty(url)
+            .unwrap_or_else(|| DEFAULT_JEV_URL.to_string())
+            .trim_end_matches('/')
+            .to_string(),
+        api_key,
+        model: non_empty(model).unwrap_or_else(|| DEFAULT_JEV_MODEL.to_string()),
+    })
 }
 
 pub fn get_cache_path() -> PathBuf {
@@ -103,31 +100,29 @@ mod tests {
     }
 
     #[test]
-    fn test_ollama_disabled_without_url() {
-        assert_eq!(ollama_config_from(None, s("m"), None).unwrap(), None);
-        assert_eq!(ollama_config_from(s("  "), s("m"), None).unwrap(), None);
+    fn test_jev_disabled_without_key() {
+        assert_eq!(jev_config_from(None, None, s("m"), None), None);
+        assert_eq!(jev_config_from(s("  "), s(""), None, None), None);
     }
 
     #[test]
-    fn test_ollama_requires_model() {
-        assert!(ollama_config_from(s("http://localhost:11434"), None, None).is_err());
-        assert!(ollama_config_from(s("http://localhost:11434"), s(""), None).is_err());
-    }
+    fn test_jev_defaults_and_overrides() {
+        let cfg = jev_config_from(s(" key \n"), None, None, None).unwrap();
+        assert_eq!(cfg.api_key, "key");
+        assert_eq!(cfg.url, "https://api.typesafe.ai");
+        assert_eq!(cfg.model, "jev-latest");
 
-    #[test]
-    fn test_ollama_defaults_and_overrides() {
-        let cfg = ollama_config_from(s("http://localhost:11434/"), s("llama3"), None)
-            .unwrap()
-            .unwrap();
-        assert_eq!(cfg.url, "http://localhost:11434");
-        assert_eq!(cfg.model, "llama3");
-        assert_eq!(cfg.num_ctx, 32768);
+        let cfg = jev_config_from(None, s("file-key"), s("jev-1.14.0"), s("http://gw/")).unwrap();
+        assert_eq!(cfg.api_key, "file-key");
+        assert_eq!(cfg.model, "jev-1.14.0");
+        assert_eq!(cfg.url, "http://gw");
 
-        let cfg = ollama_config_from(s("http://h"), s("m"), s("65536"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(cfg.num_ctx, 65536);
-
-        assert!(ollama_config_from(s("http://h"), s("m"), s("lots")).is_err());
+        // The environment wins over the config file.
+        assert_eq!(
+            jev_config_from(s("env"), s("file"), None, None)
+                .unwrap()
+                .api_key,
+            "env"
+        );
     }
 }

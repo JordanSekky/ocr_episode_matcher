@@ -3,20 +3,25 @@ use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::path::Path;
 
-use super::{llm, EpisodeMatch, MatchContext, Matcher};
+use super::{jev, EpisodeMatch, MatchContext, Matcher};
 use crate::domain::models::{parse_sxxexx, EpisodeEntry};
 use crate::infra::cache::Cache;
-use crate::infra::ollama::OllamaClient;
-use crate::media::{ffmpeg, ocr, subtitles};
+use crate::infra::jev::JevClient;
+use crate::media::{ocr, subtitles};
+use crate::workflows::renamer;
 
 pub struct SubtitleMatcher {
     pub start_seconds: u64,
     pub duration_seconds: u64,
     pub prefer_codec: subtitles::SubtitleCodec,
     pub skip_confirm: bool,
-    /// Offer specials (season 0) to the model as well as regular episodes.
+    /// Don't ask about a suggestion that would leave the file's name as it is.
+    pub accept_unchanged: bool,
+    /// Only offer Jev episodes from this season.
+    pub season: Option<u64>,
+    /// Offer specials (season 0) to Jev as well as regular episodes.
     pub include_specials: bool,
-    pub ollama: Option<OllamaClient>,
+    pub jev: Option<JevClient>,
 }
 
 impl Matcher for SubtitleMatcher {
@@ -49,48 +54,39 @@ impl Matcher for SubtitleMatcher {
 
         let lines = subtitles::extract_text(&subtitle_path, &track.codec, ocr_engine)?;
 
-        // The file length is only a prompt hint, so failing to read it isn't fatal
-        let file_minutes = match ffmpeg::get_duration_minutes(file_path) {
-            Ok(minutes) => Some(minutes),
-            Err(e) => {
-                eprintln!("Warning: could not read the file length: {e}");
-                None
-            }
-        };
-
-        if let Some(client) = &self.ollama {
-            match suggest_episode(
-                client,
-                &lines,
-                series_id,
-                cache,
-                ctx,
-                file_minutes,
-                self.include_specials,
-            ) {
+        if let Some(client) = &self.jev {
+            match self.suggest_episode(client, &lines, series_id, cache, ctx) {
                 Ok(Suggestion::Episode(episode, suggestion)) => {
                     println!(
-                        "Suggested: S{:02}E{:02} - {} (confidence: {})",
+                        "Suggested: S{:02}E{:02} - {} ({})",
                         episode.season_number,
                         episode.episode_number,
                         episode.name,
-                        suggestion.confidence
+                        percent(suggestion.probability)
                     );
-                    if !suggestion.reasoning.is_empty() {
-                        println!("  {}", suggestion.reasoning);
-                    }
+                    print_runners_up("Next most likely", &suggestion.ranked, Some(&episode));
+                    // The episode's own summary, to check Jev's pick against
+                    let summary = episode
+                        .overview
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|o| !o.is_empty())
+                        .unwrap_or("(no summary)");
+                    println!("Episode summary: {summary}");
 
                     if self.skip_confirm {
                         return Ok(Some(EpisodeMatch::unconfirmed(episode)));
                     }
+                    // Accepting would change nothing, so there is nothing to ask
+                    if self.accept_unchanged && named_for(file_path, ctx.show_name, &episode) {
+                        return Ok(Some(EpisodeMatch::confirmed(episode)));
+                    }
                     return Ok(confirm_suggestion(Some(episode), &lines, series_id, cache)?
                         .map(EpisodeMatch::confirmed));
                 }
-                Ok(Suggestion::NoMatch { reasoning }) => {
-                    println!("Ollama found no matching episode (possibly an extra or other non-episode file).");
-                    if !reasoning.is_empty() {
-                        println!("  {reasoning}");
-                    }
+                Ok(Suggestion::NoMatch { ranked }) => {
+                    println!("Jev found no matching episode (possibly an extra or other non-episode file).");
+                    print_runners_up("Most likely episodes", &ranked, None);
 
                     // Never block a batch run waiting for input; the caller warns and skips it.
                     if self.skip_confirm {
@@ -100,7 +96,7 @@ impl Matcher for SubtitleMatcher {
                         .map(EpisodeMatch::confirmed));
                 }
                 Ok(Suggestion::Unusable(reason)) => {
-                    eprintln!("Ollama's answer was rejected: {reason}.");
+                    eprintln!("Jev's answer was rejected: {reason}.");
 
                     // Never guess or block a batch run; the caller warns and skips the file.
                     if self.skip_confirm {
@@ -108,7 +104,7 @@ impl Matcher for SubtitleMatcher {
                     }
                     eprintln!("Falling back to manual entry.");
                 }
-                Err(e) => eprintln!("Ollama matching failed ({e}), falling back to manual entry."),
+                Err(e) => eprintln!("Jev matching failed ({e}), falling back to manual entry."),
             }
         }
 
@@ -126,6 +122,19 @@ impl Matcher for SubtitleMatcher {
     }
 }
 
+/// Whether the file already carries the name a match to `episode` would give it.
+fn named_for(file_path: &Path, show_name: &str, episode: &EpisodeEntry) -> bool {
+    let name = renamer::generate_filename(
+        show_name,
+        episode.season_number,
+        episode.episode_number,
+        &episode.name,
+    );
+    file_path
+        .file_name()
+        .is_some_and(|current| current == name.as_str())
+}
+
 fn lookup_episode(
     cache: &Cache,
     series_id: &str,
@@ -137,55 +146,73 @@ fn lookup_episode(
         .cloned()
 }
 
+/// A probability as a whole percentage, e.g. "93% likely".
+fn percent(probability: f64) -> String {
+    format!("{:.0}% likely", probability * 100.0)
+}
+
+/// Prints the next few options Jev rated, skipping the episode already suggested and any it
+/// all but ruled out.
+fn print_runners_up(heading: &str, ranked: &[(String, f64)], suggested: Option<&EpisodeEntry>) {
+    let suggested = suggested.map(jev::episode_label);
+    let others: Vec<String> = ranked
+        .iter()
+        .filter(|(label, p)| Some(label) != suggested.as_ref() && *p >= 0.01)
+        .take(3)
+        .map(|(label, p)| format!("{label} ({:.0}%)", p * 100.0))
+        .collect();
+    if !others.is_empty() {
+        println!("  {heading}: {}", others.join(", "));
+    }
+}
+
 enum Suggestion {
-    Episode(EpisodeEntry, llm::LlmMatch),
-    /// The model decided this file isn't one of the episodes.
+    Episode(EpisodeEntry, jev::JevMatch),
+    /// Jev decided this file isn't one of the episodes.
     NoMatch {
-        reasoning: String,
+        ranked: Vec<(String, f64)>,
     },
-    /// The model answered, but not in a way we can trust, with the reason why.
+    /// Jev answered, but not in a way we can use, with the reason why.
     Unusable(String),
 }
 
-/// Asks the model which cached episode the subtitles belong to, if any.
-fn suggest_episode(
-    client: &OllamaClient,
-    lines: &[String],
-    series_id: &str,
-    cache: &Cache,
-    ctx: &MatchContext,
-    file_minutes: Option<u64>,
-    include_specials: bool,
-) -> Result<Suggestion> {
-    let mut all = cache.episodes_for_series(series_id);
-    if all.is_empty() {
-        bail!("no cached episodes for series {series_id}");
-    }
-    // Specials are mostly extras and short webisodes that crowd out the real episodes. A series
-    // with nothing but specials keeps them.
-    if !include_specials && all.iter().any(|ep| ep.season_number != 0) {
-        all.retain(|ep| ep.season_number != 0);
-    }
-
-    let candidates = llm::select_candidates(&all, ctx);
-    println!(
-        "Asking Ollama to match against {} candidate episode(s)...",
-        candidates.len()
-    );
-
-    let (system, user) = llm::build_prompt(lines, &candidates, ctx, file_minutes);
-    let content = client.chat_json(&system, &user, llm::response_schema(&candidates))?;
-
-    Ok(match llm::parse_response(&content, &candidates) {
-        Ok(llm::LlmVerdict::Match(suggestion)) => {
-            match lookup_episode(cache, series_id, suggestion.season, suggestion.episode) {
-                Some(episode) => Suggestion::Episode(episode, suggestion),
-                None => Suggestion::Unusable("the episode is not in the cache".to_string()),
-            }
+impl SubtitleMatcher {
+    /// Asks Jev which cached episode the subtitles belong to, if any.
+    fn suggest_episode(
+        &self,
+        client: &JevClient,
+        lines: &[String],
+        series_id: &str,
+        cache: &Cache,
+        ctx: &MatchContext,
+    ) -> Result<Suggestion> {
+        let all = cache.episodes_for_series(series_id);
+        if all.is_empty() {
+            bail!("no cached episodes for series {series_id}");
         }
-        Ok(llm::LlmVerdict::NoMatch { reasoning }) => Suggestion::NoMatch { reasoning },
-        Err(reason) => Suggestion::Unusable(reason),
-    })
+        let candidates = jev::select_candidates(&all, self.season, self.include_specials);
+        if candidates.is_empty() {
+            bail!("no cached episodes to offer for this season");
+        }
+        println!(
+            "Asking Jev to match against {} candidate episode(s)...",
+            candidates.len()
+        );
+
+        let request = jev::build_request(client.model(), lines, &candidates, ctx.show_name);
+        let reply = client.ask(&request)?;
+
+        Ok(match jev::parse_response(&reply, &candidates) {
+            Ok(jev::JevVerdict::Match(suggestion)) => {
+                match lookup_episode(cache, series_id, suggestion.season, suggestion.episode) {
+                    Some(episode) => Suggestion::Episode(episode, suggestion),
+                    None => Suggestion::Unusable("the episode is not in the cache".to_string()),
+                }
+            }
+            Ok(jev::JevVerdict::NoMatch { ranked }) => Suggestion::NoMatch { ranked },
+            Err(reason) => Suggestion::Unusable(reason),
+        })
+    }
 }
 
 /// Enter accepts the suggestion (or skips the file when there is none), `v` views the
@@ -254,5 +281,23 @@ fn get_sxxexx_from_stdin() -> Result<(u64, u64)> {
             }
             Err(err) => return Err(err.into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workflows::matchers::tests::episode;
+
+    #[test]
+    fn test_named_for() {
+        let ep = episode(1, 5);
+        let named = Path::new("/disc/Show - S01E05 - Episode 1x5.mkv");
+        assert!(named_for(named, "Show", &ep));
+        assert!(!named_for(Path::new("/disc/title_t02.mkv"), "Show", &ep));
+        // A copy suffix from an earlier clash would be renamed away, so it counts as a change.
+        let copy = Path::new("/disc/Show - S01E05 - Episode 1x5 [copy 1].mkv");
+        assert!(!named_for(copy, "Show", &ep));
+        assert!(!named_for(named, "Show", &episode(1, 6)));
     }
 }

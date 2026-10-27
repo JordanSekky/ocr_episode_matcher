@@ -12,13 +12,12 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use cli::Cli;
-use domain::models::EpisodeEntry;
 use infra::cache::Cache;
-use infra::ollama::OllamaClient;
+use infra::jev::JevClient;
 use infra::tvdb::TvdbClient;
 use workflows::matchers::{
     prod_code::ProductionCodeMatcher, subtitle::SubtitleMatcher, EpisodeMatch, MatchContext,
-    Matcher, RipContext,
+    Matcher,
 };
 use workflows::renamer;
 
@@ -29,7 +28,6 @@ struct Session<'a> {
     series_id: &'a str,
     show_name: &'a str,
     skip_confirm: bool,
-    hint: Option<(u64, u64)>,
     matcher: &'a dyn Matcher,
 }
 
@@ -46,11 +44,11 @@ fn run(cli: Cli) -> Result<()> {
     // Get TVDB API key
     let api_key = config::get_tvdb_api_key()?;
 
-    // Ollama is optional and only used for subtitle matching
-    let ollama = match config::get_ollama_config()? {
+    // Jev is optional and only used for subtitle matching
+    let jev = match config::get_jev_config()? {
         Some(config) if cli.match_mode == MatchMode::Subtitles => {
-            println!("Using Ollama model {} at {}", config.model, config.url);
-            Some(OllamaClient::new(config)?)
+            println!("Using Jev model {}", config.model);
+            Some(JevClient::new(config)?)
         }
         _ => None,
     };
@@ -77,9 +75,9 @@ fn run(cli: Cli) -> Result<()> {
     };
 
     // Preload cache with series name and all episodes (only if not already cached). Caches from
-    // before overviews and runtimes were stored are refreshed when Ollama needs them.
+    // before overviews and runtimes were stored are refreshed when Jev needs them.
     let mut needs_preload = !cache.has_series_episodes(&show_id);
-    if !needs_preload && ollama.is_some() && !cache.is_series_detailed(&show_id) {
+    if !needs_preload && jev.is_some() && !cache.is_series_detailed(&show_id) {
         println!("Refreshing cache to fetch episode overviews and runtimes...");
         needs_preload = true;
     }
@@ -102,14 +100,15 @@ fn run(cli: Cli) -> Result<()> {
         }
     };
 
-    if let Some((season, episode)) = cli.hint {
-        if ollama.is_none() {
-            eprintln!("Warning: --hint only affects Ollama matching and will be ignored.");
-        } else if cache
-            .get_episode_by_sxxexx(&show_id, season, episode)
-            .is_none()
+    if let Some(season) = cli.season {
+        if jev.is_none() {
+            eprintln!("Warning: --season only affects Jev matching and will be ignored.");
+        } else if !cache
+            .episodes_for_series(&show_id)
+            .iter()
+            .any(|ep| ep.season_number == season)
         {
-            bail!("--hint S{season:02}E{episode:02} is not an episode of this series");
+            bail!("--season {season} is not a season of this series");
         }
     }
 
@@ -122,8 +121,10 @@ fn run(cli: Cli) -> Result<()> {
             duration_seconds: cli.subtitle_duration,
             prefer_codec: cli.prefer_codec,
             skip_confirm: cli.no_confirm,
+            accept_unchanged: cli.accept_unchanged,
+            season: cli.season,
             include_specials: cli.include_specials,
-            ollama,
+            jev,
         }),
     };
 
@@ -131,7 +132,6 @@ fn run(cli: Cli) -> Result<()> {
         series_id: &show_id,
         show_name: &show_name,
         skip_confirm: cli.no_confirm,
-        hint: cli.hint,
         matcher: matcher.as_ref(),
     };
 
@@ -163,10 +163,7 @@ fn process_input_path(
     cache: &mut Cache,
 ) -> Result<()> {
     if input_path.is_file() {
-        let rip = RipContext::new(vec![input_path.to_path_buf()]).with_hint(session.hint);
         let ctx = MatchContext {
-            rip: &rip,
-            index: 0,
             show_name: session.show_name,
         };
         process_file(input_path, session, cache, &ctx)?;
@@ -247,7 +244,7 @@ fn process_file(
     session: &Session,
     cache: &mut Cache,
     ctx: &MatchContext,
-) -> Result<Option<EpisodeEntry>> {
+) -> Result<()> {
     if file_path.extension().and_then(|s| s.to_str()) != Some("mkv") {
         bail!("Skipping non-MKV file: {file_path:?}");
     }
@@ -260,7 +257,7 @@ fn process_file(
 
     let Some(EpisodeMatch { episode, confirmed }) = matched else {
         eprintln!("Warning: No matching episode found for {file_path:?}");
-        return Ok(None);
+        return Ok(());
     };
 
     println!(
@@ -281,10 +278,8 @@ fn process_file(
     let new_path = renamer::find_unique_filename(file_path, directory, &new_filename);
 
     // Accepting the match at the prompt already approved the rename
-    let applied = renamer::rename_file(file_path, &new_path, session.skip_confirm || confirmed)?;
-
-    // Only confirmed matches count as locality hints for the following files
-    Ok(applied.then_some(episode))
+    renamer::rename_file(file_path, &new_path, session.skip_confirm || confirmed)?;
+    Ok(())
 }
 
 fn process_directory(
@@ -297,22 +292,13 @@ fn process_directory(
 
     println!("Found {} MKV file(s) to process", mkv_files.len());
 
-    // Files sorted alphabetically are usually adjacent episodes, so matches found so far are
-    // passed along as hints for the files that follow.
-    let mut rip = RipContext::new(mkv_files.clone()).with_hint(session.hint);
-
-    for (index, file_path) in mkv_files.iter().enumerate() {
-        let ctx = MatchContext {
-            rip: &rip,
-            index,
-            show_name: session.show_name,
-        };
-        match process_file(file_path, session, cache, &ctx) {
-            Ok(matched) => rip.matches[index] = matched,
-            Err(e) => {
-                eprintln!("Error processing {file_path:?}: {e}");
-                // Continue processing other files
-            }
+    let ctx = MatchContext {
+        show_name: session.show_name,
+    };
+    for file_path in &mkv_files {
+        if let Err(e) = process_file(file_path, session, cache, &ctx) {
+            eprintln!("Error processing {file_path:?}: {e}");
+            // Continue processing other files
         }
         println!(); // Blank line between files
     }
