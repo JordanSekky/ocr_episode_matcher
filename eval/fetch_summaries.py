@@ -2,10 +2,10 @@
 """Collects episode summaries for a season (or every season) into a JSON file, for testing
 matching changes.
 
-Each episode gets the TVDB overview the matcher uses (from its cache) and, where the show has a
+Each episode gets the overview the matcher uses (from its cache) and, where the show has a
 Fandom wiki, that wiki's synopsis and full plot as plain text.
 
-    python3 eval/fetch_summaries.py --series-id 83237 --season 1 \
+    python3 eval/fetch_summaries.py --series-id tvdb-83237 --season 1 \
         --wiki stargate.fandom.com --category Universe_Season_1_episodes \
         --out eval/stargate-universe/s01-summaries.json
 
@@ -98,7 +98,8 @@ def wiki_sections(wiki, title):
 
 def main():
     args = argparse.ArgumentParser()
-    args.add_argument("--series-id", required=True)
+    args.add_argument("--series-id", required=True,
+                      help="cache key: the provider and id, e.g. tvdb-83237 or tmdb-926")
     args.add_argument("--season", type=int, help="leave out for every season except specials")
     args.add_argument("--wiki", help="Fandom wiki host, e.g. stargate.fandom.com")
     args.add_argument("--category", help="wiki category listing the season's episodes")
@@ -112,6 +113,7 @@ def main():
         seasons[s][k] for s in sorted(wanted, key=int) for k in sorted(seasons[s], key=int)
     ]
     show = cache["series"].get(args.series_id)
+    prefix = args.series_id.split("-")[0].lower()
 
     titles = wiki_pages(args.wiki, args.category) if args.wiki else []
     if titles and len(titles) != len(episodes):
@@ -125,7 +127,7 @@ def main():
             "season": ep["season_number"],
             "episode": ep["episode_number"],
             "name": name,
-            "tvdb_overview": (ep.get("overview") or "").strip(),
+            f"{prefix}_overview": (ep.get("overview") or "").strip(),
         }
         if titles:
             synopsis, prologue, plot = wiki_sections(args.wiki, titles[i])
@@ -141,10 +143,10 @@ def main():
 
     document = {
         "show": show,
-        "tvdb_series_id": args.series_id,
+        "series_id": args.series_id,
         "season": args.season,
         "sources": {
-            "tvdb_overview": "TheTVDB, from the episode-matcher cache",
+            f"{prefix}_overview": f"{prefix.upper()}, from the episode-matcher cache",
             "wiki": f"https://{args.wiki} (Fandom, text under CC BY-SA)" if args.wiki else None,
         },
         "episodes": out,

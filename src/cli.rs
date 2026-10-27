@@ -1,29 +1,61 @@
-use clap::{Parser, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+use crate::infra::metadata::Provider;
 use crate::media::subtitles::SubtitleCodec;
 
 #[derive(Debug, Clone, ValueEnum, PartialEq, Eq)]
 pub enum MatchMode {
     ProductionCode,
     Subtitles,
+    /// Read each short's title card and pick the episode whose title is closest to it
+    TitleCard,
 }
 
 #[derive(Parser)]
 #[command(name = "episode-matcher")]
-#[command(about = "Extract production codes from video files and rename them using TVDB data")]
+#[command(
+    about = "Rename ripped episodes using TMDB (or TVDB) data, and split multi-title rips by chapter"
+)]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+#[derive(Subcommand)]
+pub enum Command {
+    /// Identify video files and rename them using TMDB (or TVDB) data
+    Rename(RenameArgs),
+    /// Split files into one file per chapter, next to the source file
+    Split(SplitArgs),
+}
+
+#[derive(Args)]
+pub struct SplitArgs {
+    /// Files to split
+    #[arg(required = true)]
+    pub inputs: Vec<PathBuf>,
+}
+
+#[derive(Args)]
+pub struct RenameArgs {
     /// Input files or directories to process
     #[arg(required = true)]
     pub inputs: Vec<PathBuf>,
 
-    /// Show name to search in TVDB
+    /// Show name to search for
     #[arg(long)]
     pub show: Option<String>,
 
-    /// Direct TVDB show ID
+    /// Show ID on the metadata provider. A `tmdb-` or `tvdb-` prefix, as in Plex and Jellyfin
+    /// folder names (`tmdb-926`), picks the provider
     #[arg(long)]
     pub show_id: Option<String>,
+
+    /// Where to get episode data: TMDB by default, or TVDB. Falls back to TVDB when only a TVDB
+    /// key is set
+    #[arg(long, value_enum)]
+    pub provider: Option<Provider>,
 
     /// Skip confirmation prompts
     #[arg(long)]
@@ -59,13 +91,23 @@ pub struct Cli {
     #[arg(long = "prefer-codec", value_enum, default_value = "subrip")]
     pub prefer_codec: SubtitleCodec,
 
-    /// Also offer specials (season 0) to Jev. They are left out by default because they are
-    /// mostly extras and short webisodes; they can still be entered by hand.
+    /// Seconds into each file to start reading the title card (title-card mode). The default
+    /// skips the studio logo that opens each short.
+    #[arg(long = "title-start", default_value_t = 8)]
+    pub title_start: u64,
+
+    /// How many seconds of the file to read for the title card (title-card mode)
+    #[arg(long = "title-duration", default_value_t = 12)]
+    pub title_duration: u64,
+
+    /// Also offer specials (season 0) to Jev, or to match against in title-card mode. They are
+    /// left out by default because they are mostly extras and short webisodes; they can still
+    /// be entered by hand.
     #[arg(long)]
     pub include_specials: bool,
 
-    /// Only offer Jev episodes from this season (e.g. 3). Without it the whole series is
-    /// offered.
+    /// Only offer episodes from this season (e.g. 3) to Jev, or to match against in title-card
+    /// mode. Without it the whole series is offered.
     #[arg(long, value_name = "N")]
     pub season: Option<u64>,
 }

@@ -2,15 +2,17 @@ use anyhow::{Context, Result};
 use clap::ValueEnum;
 use image::{imageops, Rgb, RgbImage, RgbaImage};
 use indicatif::{ProgressBar, ProgressStyle};
-use pgs_rs::parse::parse_pgs;
+use pgs_rs::parse::{parse_pgs, PaletteEntry, Pgs, SegmentContents};
 use pgs_rs::render::{render_display_set, DisplaySetIterator};
 use serde::Deserialize;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 
-use crate::media::ffmpeg;
+use crate::media::{ffmpeg, ocr};
 
 #[derive(Debug, Deserialize)]
 struct FfprobeOutput {
@@ -50,11 +52,6 @@ impl SubtitleCodec {
             "dvd_subtitle" => Some(Self::Dvd),
             _ => None,
         }
-    }
-
-    /// Whether the track is images that need OCR.
-    pub fn needs_ocr(self) -> bool {
-        self != Self::Srt
     }
 
     /// Lower is better: the preferred codec first, then text before the bitmap formats.
@@ -145,12 +142,8 @@ pub fn extract_subtitles(
 }
 
 /// Reads the extracted subtitles into plain text lines (no SRT indexes or timestamps).
-/// Bitmap tracks (PGS, DVD) are OCR'd, so `ocr_engine` is required for them.
-pub fn extract_text(
-    subtitle_path: &Path,
-    codec: &SubtitleCodec,
-    ocr_engine: Option<tesseract_rs::TesseractAPI>,
-) -> Result<Vec<String>> {
+/// Bitmap tracks (PGS, DVD) are OCR'd across all cores, one Tesseract engine per thread.
+pub fn extract_text(subtitle_path: &Path, codec: &SubtitleCodec) -> Result<Vec<String>> {
     let mut lines = Vec::new();
 
     match codec {
@@ -162,59 +155,51 @@ pub fn extract_text(
         }
         SubtitleCodec::Pgs => {
             let mut data = fs::read(subtitle_path)?;
-            let pgs =
+            let mut pgs =
                 parse_pgs(&mut data).map_err(|e| anyhow::anyhow!("Failed to parse PGS: {e:?}"))?;
+            fill_transparent_palette_entries(&mut pgs);
 
-            // We need the OCR engine for PGS
-            let api = ocr_engine.context("OCR engine required for PGS subtitles")?;
-
-            // Counting only walks the segments, so it's cheap next to the OCR below
-            let total = DisplaySetIterator::new(&pgs)
+            let display_sets: Vec<_> = DisplaySetIterator::new(&pgs)
                 .filter(|ds| !ds.is_empty())
-                .count();
-            let progress = ocr_progress_bar(total, "OCR of PGS subtitles");
+                .collect();
+            let progress = ocr_progress_bar(display_sets.len(), "OCR of PGS subtitles");
 
-            for ds in DisplaySetIterator::new(&pgs) {
-                if ds.is_empty() {
-                    continue;
-                }
-
-                if let Ok(rgba_buffer) = render_display_set(&ds) {
-                    let width = ds.width as i32;
-                    let height = ds.height as i32;
-
-                    // Convert RGBA to RGB, compositing over a black background
-                    let rgb_data: Vec<u8> = rgba_buffer
-                        .chunks(4)
-                        .flat_map(|chunk| {
-                            // chunk is [r, g, b, a]
-                            // Alpha composition: output = color * alpha + background * (1 - alpha)
-                            // Since background is black (0), output = color * alpha
-                            let r = chunk[0] as u16;
-                            let g = chunk[1] as u16;
-                            let b = chunk[2] as u16;
-                            let a = chunk[3] as u16;
-
-                            [
-                                ((r * a) / 255) as u8,
-                                ((g * a) / 255) as u8,
-                                ((b * a) / 255) as u8,
-                            ]
-                        })
-                        .collect();
-
-                    if let Some(text) = ocr_image(&api, &rgb_data, width, height) {
-                        lines.push(text);
-                        lines.push(String::new());
+            let texts = ocr_in_parallel(&display_sets, &progress, |ds| {
+                let rgba_buffer = match render_display_set(ds) {
+                    Ok(buffer) => buffer,
+                    Err(e) => {
+                        progress.suspend(|| {
+                            eprintln!("Warning: Failed to render a PGS subtitle image: {e}")
+                        });
+                        return None;
                     }
-                }
-                progress.inc(1);
-            }
+                };
+
+                // Convert RGBA to RGB, compositing over a black background
+                let rgb_data: Vec<u8> = rgba_buffer
+                    .chunks(4)
+                    .flat_map(|chunk| {
+                        // chunk is [r, g, b, a]
+                        // Alpha composition: output = color * alpha + background * (1 - alpha)
+                        // Since background is black (0), output = color * alpha
+                        let r = chunk[0] as u16;
+                        let g = chunk[1] as u16;
+                        let b = chunk[2] as u16;
+                        let a = chunk[3] as u16;
+
+                        [
+                            ((r * a) / 255) as u8,
+                            ((g * a) / 255) as u8,
+                            ((b * a) / 255) as u8,
+                        ]
+                    })
+                    .collect();
+                Some((rgb_data, ds.width as i32, ds.height as i32))
+            });
             progress.finish_and_clear();
+            push_cues(&mut lines, texts?);
         }
         SubtitleCodec::Dvd => {
-            let api = ocr_engine.context("OCR engine required for DVD subtitles")?;
-
             // Frame names are zero-padded presentation times, so name order is playback order
             let mut frames: Vec<PathBuf> = fs::read_dir(subtitle_path)?
                 .map(|entry| entry.map(|e| e.path()))
@@ -223,33 +208,115 @@ pub fn extract_text(
 
             let progress = ocr_progress_bar(frames.len(), "OCR of DVD subtitles");
 
-            for frame in progress.wrap_iter(frames.into_iter()) {
-                let rgba = match image::open(&frame) {
+            let texts = ocr_in_parallel(&frames, &progress, |frame| {
+                let rgba = match image::open(frame) {
                     Ok(img) => img.to_rgba8(),
                     Err(e) => {
                         progress.suspend(|| {
                             eprintln!("Warning: Failed to read subtitle frame {frame:?}: {e}")
                         });
-                        continue;
+                        return None;
                     }
                 };
                 // Most frames are the blank ones ffmpeg emits when a subtitle ends
-                let Some(prepared) = prepare_dvd_frame(&rgba) else {
-                    continue;
-                };
-
+                let prepared = prepare_dvd_frame(&rgba)?;
                 let (width, height) = prepared.dimensions();
-                if let Some(text) = ocr_image(&api, prepared.as_raw(), width as i32, height as i32)
-                {
-                    lines.push(text);
-                    lines.push(String::new());
-                }
-            }
+                Some((prepared.into_raw(), width as i32, height as i32))
+            });
             progress.finish_and_clear();
+            push_cues(&mut lines, texts?);
         }
     }
 
     Ok(lines)
+}
+
+/// Adds every palette entry a PGS palette leaves out, as fully transparent.
+///
+/// Encoders may leave out the entries for the transparent background (0 and 255 on the Agents
+/// of S.H.I.E.L.D. season 1 discs). Those entries are meant to be transparent, but pgs-rs fails
+/// to render an image that uses an undefined entry.
+fn fill_transparent_palette_entries(pgs: &mut Pgs) {
+    for segment in &mut pgs.segments {
+        if let SegmentContents::PaletteDefinition(palette) = &mut segment.contents {
+            for id in 0..=u8::MAX {
+                palette.entries.entry(id).or_insert(PaletteEntry {
+                    id,
+                    luminance: 0,
+                    color_difference_red: 128,
+                    color_difference_blue: 128,
+                    alpha: 0,
+                });
+            }
+        }
+    }
+}
+
+/// The text found for the item at this index, if any.
+type OcrResult = (usize, Option<String>);
+
+/// Prepares each item into an RGB image (data, width, height) and OCRs it on all cores,
+/// returning the text per item in the items' order. `None` where there was nothing to read.
+///
+/// The bundled Tesseract is built without OpenMP, so one engine only ever uses one core. Each
+/// worker owns an engine and drops it before it exits, which Tesseract needs: engines still alive
+/// at process exit make its shared cache print leak warnings.
+fn ocr_in_parallel<T: Sync>(
+    items: &[T],
+    progress: &ProgressBar,
+    prepare: impl Fn(&T) -> Option<(Vec<u8>, i32, i32)> + Sync,
+) -> Result<Vec<Option<String>>> {
+    if items.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let workers = thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(items.len());
+    let next = AtomicUsize::new(0);
+
+    let per_worker: Vec<Result<Vec<OcrResult>>> = thread::scope(|scope| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                scope.spawn(|| {
+                    let api = ocr::create_ocr_engine()?;
+                    let mut done = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(item) = items.get(index) else {
+                            break;
+                        };
+                        let text = prepare(item).and_then(|(rgb_data, width, height)| {
+                            ocr_image(&api, &rgb_data, width, height)
+                        });
+                        progress.inc(1);
+                        done.push((index, text));
+                    }
+                    Ok(done)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("OCR worker panicked"))
+            .collect()
+    });
+
+    let mut texts = vec![None; items.len()];
+    for worker in per_worker {
+        for (index, text) in worker? {
+            texts[index] = text;
+        }
+    }
+    Ok(texts)
+}
+
+/// Appends each OCR'd cue followed by a blank line, like the cues of an SRT file.
+fn push_cues(lines: &mut Vec<String>, texts: Vec<Option<String>>) {
+    for text in texts.into_iter().flatten() {
+        lines.push(text);
+        lines.push(String::new());
+    }
 }
 
 /// A progress bar for OCR'ing `total` subtitle images, drawn on stderr.
@@ -400,6 +467,43 @@ mod tests {
             clean_ocr_text(input_with_invalid).trim(),
             expected_cleaned.trim()
         );
+    }
+
+    #[test]
+    fn test_fill_transparent_palette_entries() {
+        use pgs_rs::parse::{PaletteDefinition, Segment};
+        use std::collections::HashMap;
+
+        let defined = PaletteEntry {
+            id: 1,
+            luminance: 200,
+            color_difference_red: 120,
+            color_difference_blue: 130,
+            alpha: 255,
+        };
+        let mut pgs = Pgs {
+            segments: vec![Segment {
+                pts: 0,
+                dts: 0,
+                contents: SegmentContents::PaletteDefinition(PaletteDefinition {
+                    id: 0,
+                    version: 0,
+                    entries: HashMap::from([(1, defined)]),
+                }),
+            }],
+        };
+
+        fill_transparent_palette_entries(&mut pgs);
+
+        let SegmentContents::PaletteDefinition(palette) = &pgs.segments[0].contents else {
+            panic!("expected a palette");
+        };
+        assert_eq!(palette.entries.len(), 256);
+        // What the encoder defined is left alone; what it left out is invisible.
+        assert_eq!(palette.entries[&1].luminance, 200);
+        assert_eq!(palette.entries[&1].alpha, 255);
+        assert_eq!(palette.entries[&0].alpha, 0);
+        assert_eq!(palette.entries[&255].alpha, 0);
     }
 
     fn streams(json: &str) -> FfprobeOutput {

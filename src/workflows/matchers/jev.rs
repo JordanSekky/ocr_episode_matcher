@@ -57,25 +57,7 @@ pub fn episode_label(ep: &EpisodeEntry) -> String {
     format!("S{:02}E{:02} - {name}", ep.season_number, ep.episode_number)
 }
 
-/// The episodes offered to Jev: one season if the user named one, otherwise the whole series.
-/// Specials are mostly extras and short webisodes that crowd out the real episodes, so they are
-/// left out unless asked for (or named as the season), or unless the series has nothing else.
-pub fn select_candidates(
-    all: &[EpisodeEntry],
-    season: Option<u64>,
-    include_specials: bool,
-) -> Vec<EpisodeEntry> {
-    let has_regular = all.iter().any(|ep| ep.season_number != 0);
-    all.iter()
-        .filter(|ep| match season {
-            Some(season) => ep.season_number == season,
-            None => include_specials || !has_regular || ep.season_number != 0,
-        })
-        .cloned()
-        .collect()
-}
-
-/// A multiple-choice question over the candidates, each described by its TVDB overview, with
+/// A multiple-choice question over the candidates, each described by its overview, with
 /// the subtitles as the text to judge. serde_json's `preserve_order` keeps the options in airing
 /// order with NO MATCH last.
 pub fn build_request(
@@ -184,50 +166,6 @@ fn truncate_chars(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::workflows::matchers::tests::episode;
-
-    fn series(seasons: u64, per_season: u64) -> Vec<EpisodeEntry> {
-        (1..=seasons)
-            .flat_map(|s| (1..=per_season).map(move |e| episode(s, e)))
-            .collect()
-    }
-
-    fn numbers(eps: &[EpisodeEntry]) -> Vec<(u64, u64)> {
-        eps.iter()
-            .map(|e| (e.season_number, e.episode_number))
-            .collect()
-    }
-
-    #[test]
-    fn test_select_candidates_without_season_returns_the_series() {
-        let all = series(2, 24);
-        assert_eq!(select_candidates(&all, None, false).len(), 48);
-    }
-
-    #[test]
-    fn test_select_candidates_keeps_only_the_named_season() {
-        let all = series(3, 24);
-        let got = numbers(&select_candidates(&all, Some(2), false));
-        assert_eq!(got.len(), 24);
-        assert!(got.iter().all(|&(season, _)| season == 2));
-        assert!(select_candidates(&all, Some(9), false).is_empty());
-    }
-
-    #[test]
-    fn test_select_candidates_specials() {
-        let mut all = series(1, 3);
-        all.push(episode(0, 1));
-
-        assert_eq!(select_candidates(&all, None, false).len(), 3);
-        assert_eq!(select_candidates(&all, None, true).len(), 4);
-        // Naming season 0 asks for the specials.
-        assert_eq!(
-            numbers(&select_candidates(&all, Some(0), false)),
-            vec![(0, 1)]
-        );
-        // A series with nothing but specials keeps them.
-        let specials = vec![episode(0, 1), episode(0, 2)];
-        assert_eq!(select_candidates(&specials, None, false).len(), 2);
-    }
 
     #[test]
     fn test_build_request() {

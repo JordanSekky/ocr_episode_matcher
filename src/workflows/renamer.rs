@@ -20,10 +20,12 @@ pub fn generate_filename(
 }
 
 fn sanitize_filename(name: &str) -> String {
-    // Remove or replace invalid filename characters
+    // Remove or replace invalid filename characters. A question mark is dropped, not replaced,
+    // as in Jellyfin and FileBot: it usually ends a title, which would leave a dangling dash.
     name.chars()
+        .filter(|&c| c != '?')
         .map(|c| match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            '/' | '\\' | ':' | '*' | '"' | '<' | '>' | '|' => '-',
             c => c,
         })
         .collect::<String>()
@@ -113,7 +115,11 @@ mod tests {
         assert_eq!(sanitize_filename("Name*With*Stars"), "Name-With-Stars");
         assert_eq!(
             sanitize_filename("Name?With?Questions"),
-            "Name-With-Questions"
+            "NameWithQuestions"
+        );
+        assert_eq!(
+            sanitize_filename("What the Hex Going On?"),
+            "What the Hex Going On"
         );
         assert_eq!(sanitize_filename("Name\"With\"Quotes"), "Name-With-Quotes");
         assert_eq!(sanitize_filename("Name<With<Less"), "Name-With-Less");
@@ -130,7 +136,7 @@ mod tests {
         );
         assert_eq!(
             generate_filename("Show: Name", 2, 15, "Ep/isode?"),
-            "Show- Name - S02E15 - Ep-isode-.mkv"
+            "Show- Name - S02E15 - Ep-isode.mkv"
         );
     }
 

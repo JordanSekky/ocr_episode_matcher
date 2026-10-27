@@ -1,2 +1,3 @@
 pub mod matchers;
 pub mod renamer;
+pub mod splitter;

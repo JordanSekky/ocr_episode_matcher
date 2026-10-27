@@ -11,15 +11,17 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use cli::Cli;
+use cli::{Cli, Command, RenameArgs, SplitArgs};
 use infra::cache::Cache;
 use infra::jev::JevClient;
+use infra::metadata::{cache_key, parse_show_id, MetadataProvider, Provider};
+use infra::tmdb::TmdbClient;
 use infra::tvdb::TvdbClient;
 use workflows::matchers::{
-    prod_code::ProductionCodeMatcher, subtitle::SubtitleMatcher, EpisodeMatch, MatchContext,
-    Matcher,
+    prod_code::ProductionCodeMatcher, subtitle::SubtitleMatcher, title_card::TitleCardMatcher,
+    EpisodeMatch, MatchContext, Matcher,
 };
-use workflows::renamer;
+use workflows::{renamer, splitter};
 
 use crate::cli::MatchMode;
 
@@ -34,15 +36,68 @@ struct Session<'a> {
 fn main() {
     let cli = Cli::parse();
 
-    if let Err(e) = run(cli) {
+    let result = match cli.command {
+        Command::Rename(args) => rename(args),
+        Command::Split(args) => split(args),
+    };
+
+    if let Err(e) = result {
         eprintln!("Error: {e}");
         std::process::exit(1);
     }
 }
 
-fn run(cli: Cli) -> Result<()> {
-    // Get TVDB API key
-    let api_key = config::get_tvdb_api_key()?;
+fn split(args: SplitArgs) -> Result<()> {
+    let mut failed = false;
+    for input_path in &args.inputs {
+        println!("Splitting: {input_path:?}");
+        match splitter::split_by_chapter(input_path) {
+            Ok(outputs) => println!("Wrote {} file(s)\n", outputs.len()),
+            Err(e) => {
+                eprintln!("Error splitting {input_path:?}: {e:#}\n");
+                failed = true;
+            }
+        }
+    }
+
+    if failed {
+        bail!("Some files could not be split");
+    }
+    Ok(())
+}
+
+fn rename(cli: RenameArgs) -> Result<()> {
+    // A prefixed --show-id (tmdb-926) names the provider itself
+    let (id_provider, bare_id) = match cli.show_id.as_deref().map(parse_show_id) {
+        Some((provider, id)) => (provider, Some(id)),
+        None => (None, None),
+    };
+    if let (Some(flag), Some(prefix)) = (cli.provider, id_provider) {
+        if flag != prefix {
+            bail!(
+                "--provider {} conflicts with --show-id {}",
+                flag.prefix(),
+                cli.show_id.as_deref().unwrap_or_default()
+            );
+        }
+    }
+    if cli.show.is_some() && bare_id.is_some() {
+        bail!("Error: Cannot specify both --show and --show-id");
+    }
+    if cli.show.is_none() && bare_id.is_none() {
+        bail!("Error: Must specify either --show or --show-id");
+    }
+
+    let (provider, api_key) = config::choose_provider(
+        cli.provider.or(id_provider),
+        config::get_tmdb_api_key()?,
+        config::get_tvdb_api_key()?,
+    )?;
+    println!("Using {}", provider.label());
+    let mut client: Box<dyn MetadataProvider> = match provider {
+        Provider::Tmdb => Box::new(TmdbClient::new(api_key)),
+        Provider::Tvdb => Box::new(TvdbClient::new(api_key)),
+    };
 
     // Jev is optional and only used for subtitle matching
     let jev = match config::get_jev_config()? {
@@ -55,24 +110,20 @@ fn run(cli: Cli) -> Result<()> {
 
     // Load cache
     let mut cache = Cache::load();
-    let mut client = TvdbClient::new(api_key.to_string());
 
     // Determine show ID
-    let show_id = match (cli.show, cli.show_id) {
-        (Some(show_name), None) => match search_and_select_show(&mut client, &show_name) {
+    let provider_id = match (cli.show, bare_id) {
+        (Some(show_name), None) => match search_and_select_show(client.as_mut(), &show_name) {
             Ok(id) => id,
             Err(e) => {
                 bail!("Error searching for show: {e}");
             }
         },
         (None, Some(id)) => id,
-        (Some(_), Some(_)) => {
-            bail!("Error: Cannot specify both --show and --show-id");
-        }
-        (None, None) => {
-            bail!("Error: Must specify either --show or --show-id");
-        }
+        _ => unreachable!("--show / --show-id were checked above"),
     };
+    // What the cache and matchers know the series by
+    let show_id = cache_key(provider, &provider_id);
 
     // Preload cache with series name and all episodes (only if not already cached). Caches from
     // before overviews and runtimes were stored are refreshed when Jev needs them.
@@ -82,7 +133,9 @@ fn run(cli: Cli) -> Result<()> {
         needs_preload = true;
     }
     if needs_preload {
-        preload_cache(&mut client, &show_id, &mut cache)?;
+        println!("Preloading episode cache for series {show_id}...");
+        client.preload_episodes(&provider_id, &show_id, &mut cache)?;
+        println!("Cache preloaded successfully.");
         // Persist right away: the preload is slow, and bailing or being interrupted later in the
         // run would otherwise throw it away and force a refetch next time.
         if let Err(e) = cache.save() {
@@ -93,7 +146,7 @@ fn run(cli: Cli) -> Result<()> {
     }
 
     // Get show name from cache or API
-    let show_name = match get_show_name(&mut client, &show_id, &mut cache) {
+    let show_name = match get_show_name(client.as_mut(), &provider_id, &show_id, &mut cache) {
         Ok(name) => name,
         Err(e) => {
             bail!("Error getting show name: {e}");
@@ -101,8 +154,10 @@ fn run(cli: Cli) -> Result<()> {
     };
 
     if let Some(season) = cli.season {
-        if jev.is_none() {
-            eprintln!("Warning: --season only affects Jev matching and will be ignored.");
+        if jev.is_none() && cli.match_mode != MatchMode::TitleCard {
+            eprintln!(
+                "Warning: --season only affects Jev and title-card matching and will be ignored."
+            );
         } else if !cache
             .episodes_for_series(&show_id)
             .iter()
@@ -125,6 +180,13 @@ fn run(cli: Cli) -> Result<()> {
             season: cli.season,
             include_specials: cli.include_specials,
             jev,
+        }),
+        MatchMode::TitleCard => Box::new(TitleCardMatcher {
+            start_seconds: cli.title_start,
+            duration_seconds: cli.title_duration,
+            skip_confirm: cli.no_confirm,
+            season: cli.season,
+            include_specials: cli.include_specials,
         }),
     };
 
@@ -176,22 +238,7 @@ fn process_input_path(
     Ok(())
 }
 
-fn preload_cache(client: &mut TvdbClient, series_id: &str, cache: &mut Cache) -> Result<()> {
-    // Get series name if not cached
-    if cache.get_series_name(series_id).is_none() {
-        let series_name = client.get_series_name(series_id)?;
-        cache.set_series_name(series_id.to_string(), series_name);
-    }
-
-    // Preload all episodes for this series
-    println!("Preloading episode cache for series {series_id}...");
-    client.preload_episodes(series_id, cache)?;
-    println!("Cache preloaded successfully.");
-
-    Ok(())
-}
-
-fn search_and_select_show(client: &mut TvdbClient, query: &str) -> Result<String> {
+fn search_and_select_show(client: &mut dyn MetadataProvider, query: &str) -> Result<String> {
     let results = client.search_series(query)?;
 
     if results.is_empty() {
@@ -199,20 +246,18 @@ fn search_and_select_show(client: &mut TvdbClient, query: &str) -> Result<String
     }
 
     if results.len() == 1 {
-        return Ok(results[0].tvdb_id.clone());
+        return Ok(results[0].id.clone());
     }
 
     // Multiple results - let user select
     println!("Multiple shows found. Please select one:");
     for (i, result) in results.iter().enumerate() {
-        let name = result
-            .name
+        let year = result
+            .year
             .as_ref()
-            .and_then(|n| n.get("eng"))
-            .or_else(|| result.name.as_ref().and_then(|n| n.values().next()))
-            .map(|s| s.as_str())
-            .unwrap_or("Unknown");
-        println!("  {}: {} (ID: {})", i + 1, name, result.tvdb_id);
+            .map(|y| format!(" ({y})"))
+            .unwrap_or_default();
+        println!("  {}: {}{year} (ID: {})", i + 1, result.name, result.id);
     }
 
     loop {
@@ -230,7 +275,7 @@ fn search_and_select_show(client: &mut TvdbClient, query: &str) -> Result<String
         };
 
         if choice >= 1 && choice <= results.len() {
-            return Ok(results[choice - 1].tvdb_id.clone());
+            return Ok(results[choice - 1].id.clone());
         }
         println!(
             "Invalid selection. Please enter a number between 1 and {}.",
@@ -337,11 +382,16 @@ fn collect_mkv_files_helper(
     Ok(())
 }
 
-fn get_show_name(client: &mut TvdbClient, show_id: &str, cache: &mut Cache) -> Result<String> {
+fn get_show_name(
+    client: &mut dyn MetadataProvider,
+    provider_id: &str,
+    show_id: &str,
+    cache: &mut Cache,
+) -> Result<String> {
     if let Some(name) = cache.get_series_name(show_id) {
         return Ok(name.clone());
     }
-    let name = client.get_series_name(show_id)?;
+    let name = client.series_name(provider_id)?;
     cache.set_series_name(show_id.to_string(), name.clone());
     Ok(name)
 }

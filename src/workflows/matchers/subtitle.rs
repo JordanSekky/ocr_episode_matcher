@@ -4,10 +4,10 @@ use rustyline::DefaultEditor;
 use std::path::Path;
 
 use super::{jev, EpisodeMatch, MatchContext, Matcher};
-use crate::domain::models::{parse_sxxexx, EpisodeEntry};
+use crate::domain::models::{parse_sxxexx, select_candidates, EpisodeEntry};
 use crate::infra::cache::Cache;
 use crate::infra::jev::JevClient;
-use crate::media::{ocr, subtitles};
+use crate::media::subtitles;
 use crate::workflows::renamer;
 
 pub struct SubtitleMatcher {
@@ -46,13 +46,7 @@ impl Matcher for SubtitleMatcher {
         )?;
         println!("Extracted subtitle to {subtitle_path:?}");
 
-        let ocr_engine = if track.codec.needs_ocr() {
-            Some(ocr::create_ocr_engine()?)
-        } else {
-            None
-        };
-
-        let lines = subtitles::extract_text(&subtitle_path, &track.codec, ocr_engine)?;
+        let lines = subtitles::extract_text(&subtitle_path, &track.codec)?;
 
         if let Some(client) = &self.jev {
             match self.suggest_episode(client, &lines, series_id, cache, ctx) {
@@ -190,7 +184,7 @@ impl SubtitleMatcher {
         if all.is_empty() {
             bail!("no cached episodes for series {series_id}");
         }
-        let candidates = jev::select_candidates(&all, self.season, self.include_specials);
+        let candidates = select_candidates(&all, self.season, self.include_specials);
         if candidates.is_empty() {
             bail!("no cached episodes to offer for this season");
         }

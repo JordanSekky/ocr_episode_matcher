@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use anyhow::{bail, Result};
 
 use crate::domain::models::EpisodeEntry;
+use crate::infra::metadata::{MetadataProvider, SeriesHit};
 
 const TVDB_API_BASE: &str = "https://api4.thetvdb.com/v4";
 
@@ -29,10 +30,23 @@ struct SearchResponse {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct SearchResult {
-    pub tvdb_id: String,
-    #[serde(rename = "translations")]
-    pub name: Option<HashMap<String, String>>,
+struct SearchResult {
+    tvdb_id: String,
+    name: Option<String>,
+    year: Option<String>,
+    translations: Option<HashMap<String, String>>,
+}
+
+impl SearchResult {
+    /// The English name if TVDB has a translation, else any translation, else the original name.
+    fn display_name(&self) -> String {
+        self.translations
+            .as_ref()
+            .and_then(|t| t.get("eng").or_else(|| t.values().next()))
+            .or(self.name.as_ref())
+            .cloned()
+            .unwrap_or_else(|| "Unknown".to_string())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,7 +128,7 @@ impl TvdbClient {
         Ok(())
     }
 
-    pub fn search_series(&mut self, query: &str) -> Result<Vec<SearchResult>> {
+    fn search(&mut self, query: &str) -> Result<Vec<SearchResult>> {
         self.ensure_authenticated()?;
 
         let client = reqwest::blocking::Client::new();
@@ -135,7 +149,7 @@ impl TvdbClient {
         Ok(search_resp.data)
     }
 
-    pub fn get_series_name(&mut self, series_id: &str) -> Result<String> {
+    fn get_series_name(&mut self, series_id: &str) -> Result<String> {
         self.ensure_authenticated()?;
 
         let client = reqwest::blocking::Client::new();
@@ -156,9 +170,10 @@ impl TvdbClient {
         Ok(series_resp.data.name)
     }
 
-    pub fn preload_episodes(
+    fn fetch_episodes(
         &mut self,
         series_id: &str,
+        cache_key: &str,
         cache: &mut crate::infra::cache::Cache,
     ) -> Result<()> {
         self.ensure_authenticated()?;
@@ -229,12 +244,43 @@ impl TvdbClient {
                         aired: extended_resp.data.aired,
                         runtime: extended_resp.data.runtime,
                     };
-                    cache.set_episode(series_id, &entry);
+                    cache.set_episode(cache_key, &entry);
                 }
             }
         }
 
-        cache.mark_series_detailed(series_id);
+        cache.mark_series_detailed(cache_key);
         Ok(())
+    }
+}
+
+impl MetadataProvider for TvdbClient {
+    fn search_series(&mut self, query: &str) -> Result<Vec<SeriesHit>> {
+        Ok(self
+            .search(query)?
+            .into_iter()
+            .map(|r| SeriesHit {
+                name: r.display_name(),
+                year: r.year,
+                id: r.tvdb_id,
+            })
+            .collect())
+    }
+
+    fn series_name(&mut self, id: &str) -> Result<String> {
+        self.get_series_name(id)
+    }
+
+    fn preload_episodes(
+        &mut self,
+        id: &str,
+        cache_key: &str,
+        cache: &mut crate::infra::cache::Cache,
+    ) -> Result<()> {
+        if cache.get_series_name(cache_key).is_none() {
+            let name = self.get_series_name(id)?;
+            cache.set_series_name(cache_key.to_string(), name);
+        }
+        self.fetch_episodes(id, cache_key, cache)
     }
 }

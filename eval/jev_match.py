@@ -83,7 +83,7 @@ def main():
     args.add_argument("--eval-set", required=True, help="TSV of id, expected SxxExx, path")
     args.add_argument("--subtitles", required=True)
     args.add_argument("--source", default="tvdb_overview",
-                      help="summary field: tvdb_overview, wiki_synopsis or wiki_plot")
+                      help="summary field: tvdb_overview, tmdb_overview, wiki_synopsis or wiki_plot")
     args.add_argument("--mode", choices=("choice", "yesno"), default="choice")
     args.add_argument("--model", default="jev-latest")
     args.add_argument("--key-file", default="jev-key.txt")

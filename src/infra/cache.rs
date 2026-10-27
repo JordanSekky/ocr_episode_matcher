@@ -16,13 +16,21 @@ pub struct Cache {
     pub detailed_series: HashSet<String>,
 }
 
+fn legacy_key(key: String) -> String {
+    if key.contains('-') {
+        key
+    } else {
+        format!("tvdb-{key}")
+    }
+}
+
 impl Cache {
     pub fn load() -> Self {
         let cache_path = get_cache_path();
         if cache_path.exists() {
             match fs::read_to_string(&cache_path) {
-                Ok(content) => match serde_json::from_str(&content) {
-                    Ok(cache) => return cache,
+                Ok(content) => match serde_json::from_str::<Cache>(&content) {
+                    Ok(cache) => return cache.migrate_legacy_keys(),
                     Err(e) => eprintln!(
                         "Warning: Ignoring unreadable cache {}: {e}",
                         cache_path.display()
@@ -35,6 +43,19 @@ impl Cache {
             }
         }
         Cache::default()
+    }
+
+    /// Series used to be keyed by their bare TVDB id. Providers' ids overlap, so keys now carry
+    /// the provider (`tvdb-78260`); a bare key can only have come from TVDB.
+    fn migrate_legacy_keys(mut self) -> Self {
+        fn rekey<V>(map: HashMap<String, V>) -> HashMap<String, V> {
+            map.into_iter().map(|(k, v)| (legacy_key(k), v)).collect()
+        }
+        self.series = rekey(self.series);
+        self.episodes_by_production_code = rekey(self.episodes_by_production_code);
+        self.episodes_by_sxxexx = rekey(self.episodes_by_sxxexx);
+        self.detailed_series = self.detailed_series.into_iter().map(legacy_key).collect();
+        self
     }
 
     pub fn save(&self) -> Result<()> {
@@ -215,6 +236,36 @@ mod tests {
         cache.mark_series_detailed("1");
         assert!(cache.is_series_detailed("1"));
         assert!(!cache.is_series_detailed("2"));
+    }
+
+    #[test]
+    fn test_legacy_series_keys_become_tvdb_keys() {
+        let json = r#"{
+            "series": {"78260": "Scooby", "tmdb-926": "Scooby"},
+            "episodes_by_production_code": {"78260": {}},
+            "episodes_by_sxxexx": {"78260": {"1": {"1": {
+                "production_code": null,
+                "season_number": 1,
+                "episode_number": 1,
+                "name": "Pilot"
+            }}}},
+            "detailed_series": ["78260"]
+        }"#;
+        let cache = serde_json::from_str::<Cache>(json)
+            .unwrap()
+            .migrate_legacy_keys();
+        assert_eq!(cache.get_series_name("tvdb-78260").unwrap(), "Scooby");
+        assert_eq!(cache.get_series_name("tmdb-926").unwrap(), "Scooby");
+        assert!(cache.get_series_name("78260").is_none());
+        assert!(cache.has_series_episodes("tvdb-78260"));
+        assert_eq!(
+            cache
+                .get_episode_by_sxxexx("tvdb-78260", 1, 1)
+                .unwrap()
+                .name,
+            "Pilot"
+        );
+        assert!(cache.is_series_detailed("tvdb-78260"));
     }
 
     #[test]

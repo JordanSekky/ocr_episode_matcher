@@ -46,6 +46,7 @@ pub trait Matcher {
 pub mod jev;
 pub mod prod_code;
 pub mod subtitle;
+pub mod title_card;
 
 #[cfg(test)]
 mod tests {
