@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use clap::ValueEnum;
 use image::{imageops, Rgb, RgbImage, RgbaImage};
+use indicatif::{ProgressBar, ProgressStyle};
 use pgs_rs::parse::parse_pgs;
 use pgs_rs::render::{render_display_set, DisplaySetIterator};
 use serde::Deserialize;
@@ -167,6 +168,12 @@ pub fn extract_text(
             // We need the OCR engine for PGS
             let api = ocr_engine.context("OCR engine required for PGS subtitles")?;
 
+            // Counting only walks the segments, so it's cheap next to the OCR below
+            let total = DisplaySetIterator::new(&pgs)
+                .filter(|ds| !ds.is_empty())
+                .count();
+            let progress = ocr_progress_bar(total, "OCR of PGS subtitles");
+
             for ds in DisplaySetIterator::new(&pgs) {
                 if ds.is_empty() {
                     continue;
@@ -201,7 +208,9 @@ pub fn extract_text(
                         lines.push(String::new());
                     }
                 }
+                progress.inc(1);
             }
+            progress.finish_and_clear();
         }
         SubtitleCodec::Dvd => {
             let api = ocr_engine.context("OCR engine required for DVD subtitles")?;
@@ -212,11 +221,15 @@ pub fn extract_text(
                 .collect::<std::io::Result<_>>()?;
             frames.sort();
 
-            for frame in frames {
+            let progress = ocr_progress_bar(frames.len(), "OCR of DVD subtitles");
+
+            for frame in progress.wrap_iter(frames.into_iter()) {
                 let rgba = match image::open(&frame) {
                     Ok(img) => img.to_rgba8(),
                     Err(e) => {
-                        eprintln!("Warning: Failed to read subtitle frame {frame:?}: {e}");
+                        progress.suspend(|| {
+                            eprintln!("Warning: Failed to read subtitle frame {frame:?}: {e}")
+                        });
                         continue;
                     }
                 };
@@ -232,10 +245,23 @@ pub fn extract_text(
                     lines.push(String::new());
                 }
             }
+            progress.finish_and_clear();
         }
     }
 
     Ok(lines)
+}
+
+/// A progress bar for OCR'ing `total` subtitle images, drawn on stderr.
+fn ocr_progress_bar(total: usize, message: &'static str) -> ProgressBar {
+    let progress = ProgressBar::new(total as u64);
+    progress.set_style(
+        ProgressStyle::with_template("{msg} [{bar:40}] {pos}/{len} ({elapsed} elapsed, ETA {eta})")
+            .expect("valid progress template")
+            .progress_chars("=> "),
+    );
+    progress.set_message(message);
+    progress
 }
 
 /// Space kept around the text so Tesseract doesn't see it touching the image edge.

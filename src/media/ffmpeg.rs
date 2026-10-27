@@ -1,6 +1,23 @@
 use anyhow::{bail, Context, Result};
+use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Output};
+use std::time::Duration;
+
+/// Runs `command` to completion while showing a spinner labelled `message` on stderr.
+fn run_with_spinner(command: &mut Command, message: &'static str) -> std::io::Result<Output> {
+    let spinner = ProgressBar::new_spinner();
+    spinner.set_style(
+        ProgressStyle::with_template("{spinner} {msg} ({elapsed})")
+            .expect("valid spinner template"),
+    );
+    spinner.set_message(message);
+    spinner.enable_steady_tick(Duration::from_millis(100));
+
+    let output = command.output();
+    spinner.finish_and_clear();
+    output
+}
 
 pub fn get_streams_json(path: &Path) -> Result<Vec<u8>> {
     let output = Command::new("ffprobe")
@@ -40,8 +57,8 @@ pub fn extract_subtitle_track(
     let start = start_seconds.to_string();
     let duration = duration_seconds.to_string();
 
-    let output = Command::new("ffmpeg")
-        .args([
+    let output = run_with_spinner(
+        Command::new("ffmpeg").args([
             "-y",
             "-ss",
             &start,
@@ -54,9 +71,10 @@ pub fn extract_subtitle_track(
             "-t",
             &duration,
             output_str,
-        ])
-        .output()
-        .context("Failed to run ffmpeg for subtitle extraction")?;
+        ]),
+        "Extracting subtitles with ffmpeg",
+    )
+    .context("Failed to run ffmpeg for subtitle extraction")?;
 
     if !output.status.success() {
         bail!(
@@ -85,8 +103,8 @@ pub fn extract_subtitle_frames(
 
     // `-t` goes before `-i` because the rendered frames start at the first subtitle, not at 0,
     // so as an output option it would read `duration` seconds past the first subtitle.
-    let output = Command::new("ffmpeg")
-        .args([
+    let output = run_with_spinner(
+        Command::new("ffmpeg").args([
             "-y",
             "-ss",
             &start,
@@ -106,9 +124,10 @@ pub fn extract_subtitle_frames(
             output_pattern
                 .to_str()
                 .context("Invalid output path for subtitle frames")?,
-        ])
-        .output()
-        .context("Failed to run ffmpeg for subtitle frame extraction")?;
+        ]),
+        "Rendering subtitle frames with ffmpeg",
+    )
+    .context("Failed to run ffmpeg for subtitle frame extraction")?;
 
     if !output.status.success() {
         bail!(
